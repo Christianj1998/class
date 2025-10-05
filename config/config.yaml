@@ -1,5 +1,5 @@
 app:
-  name: "Multi-Cam Face Tracker"
+  name: "DSIP Recognition System"
   version: "1.0.0"
   threshold: 0.6
   screenshot_dir: "data/screenshots"

@@ -2,9 +2,10 @@ import sys
 import time
 from PyQt5.QtWidgets import (QMainWindow, QApplication, QWidget, QVBoxLayout, QHBoxLayout,
                             QLabel, QPushButton, QTabWidget, QScrollArea, QGridLayout,
-                            QMessageBox, QFileDialog, QComboBox, QSlider, QSpinBox)
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QSize
-from PyQt5.QtGui import QPixmap, QImage, QIcon
+                            QMessageBox, QFileDialog, QComboBox, QSlider, QSpinBox,
+                            QStackedWidget, QFrame, QGraphicsDropShadowEffect)
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QSize, QPropertyAnimation, QEasingCurve, QRect, QPoint
+from PyQt5.QtGui import QPixmap, QImage, QIcon, QPalette, QColor, QPainter, QLinearGradient, QPen
 from loguru import logger
 from typing import Dict, Optional, Tuple
 import numpy as np
@@ -16,193 +17,459 @@ from core.camera_manager import CameraManager
 from core.alert_system import AlertEvent, AlertSystem
 from core.database import FaceDatabase
 from core.utils import numpy_to_pixmap, resize_image, draw_face_info
-from .face_manager import FaceManagerDialog
-from .alert_panel import AlertPanel
-from .history_viewer import HistoryViewer
+from ui.face_manager import FaceManagerDialog
+from ui.alert_panel import AlertPanel
+from ui.history_viewer import HistoryViewer
+
+
+class ModernButton(QPushButton):
+    """Botón estilo Windows 11 con efectos hover"""
+    def __init__(self, icon_text="", text="", parent=None):
+        super().__init__(parent)
+        self.icon_text = icon_text
+        self.button_text = text
+        self.is_active = False
+        self.setMinimumHeight(50)
+        self.setCursor(Qt.PointingHandCursor)
+        self.update_style()
+        
+    def update_style(self):
+        active_bg = "rgba(255, 255, 255, 0.1)" if self.is_active else "transparent"
+        self.setStyleSheet(f"""
+            ModernButton {{
+                background-color: {active_bg};
+                border: none;
+                border-radius: 8px;
+                color: white;
+                text-align: left;
+                padding: 12px 16px;
+                font-size: 14px;
+                font-weight: 500;
+            }}
+            ModernButton:hover {{
+                background-color: rgba(255, 255, 255, 0.08);
+            }}
+            ModernButton:pressed {{
+                background-color: rgba(255, 255, 255, 0.05);
+            }}
+        """)
+        
+    def set_active(self, active):
+        self.is_active = active
+        self.update_style()
+        
+    def setText(self, text):
+        self.button_text = text
+        super().setText(f"  {self.icon_text}  {text}")
+
+
+class SidebarWidget(QWidget):
+    """Barra lateral estilo Windows 11"""
+    page_changed = pyqtSignal(int)
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.buttons = []
+        self.current_index = 0
+        self.setup_ui()
+        
+    def setup_ui(self):
+        self.setFixedWidth(280)
+        
+        # Fondo con gradiente oscuro
+        self.setStyleSheet("""
+            SidebarWidget {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                    stop:0 rgba(32, 32, 42, 0.95),
+                    stop:1 rgba(28, 28, 38, 0.95));
+                border-right: 1px solid rgba(255, 255, 255, 0.1);
+            }
+        """)
+        
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 24, 16, 24)
+        layout.setSpacing(8)
+        
+        # Logo y título
+        header = QWidget()
+        header_layout = QVBoxLayout(header)
+        header_layout.setSpacing(8)
+        
+        logo_label = QLabel("🎥")
+        logo_label.setStyleSheet("""
+            font-size: 32px;
+            padding: 8px;
+        """)
+        logo_label.setAlignment(Qt.AlignCenter)
+        
+        title_label = QLabel("Face Recognition")
+        title_label.setStyleSheet("""
+            color: white;
+            font-size: 18px;
+            font-weight: bold;
+            padding: 0px 8px;
+        """)
+        title_label.setAlignment(Qt.AlignCenter)
+        
+        subtitle_label = QLabel("v1.0.0")
+        subtitle_label.setStyleSheet("""
+            color: rgba(255, 255, 255, 0.6);
+            font-size: 12px;
+            padding: 0px 8px 16px 8px;
+        """)
+        subtitle_label.setAlignment(Qt.AlignCenter)
+        
+        header_layout.addWidget(logo_label)
+        header_layout.addWidget(title_label)
+        header_layout.addWidget(subtitle_label)
+        
+        layout.addWidget(header)
+        
+        # Separador
+        separator = QFrame()
+        separator.setFrameShape(QFrame.HLine)
+        separator.setStyleSheet("background-color: rgba(255, 255, 255, 0.1); max-height: 1px;")
+        layout.addWidget(separator)
+        layout.addSpacing(8)
+        
+        # Botones de navegación
+        self.add_nav_button("📹", "Monitor", 0)
+        self.add_nav_button("⚙️", "Controles", 1)
+        self.add_nav_button("📊", "Historial", 2)
+        self.add_nav_button("👤", "Administrar Rostros", 3)
+        self.add_nav_button("🔔", "Alertas", 4)
+        
+        layout.addStretch()
+        
+        # Botón de configuración al final
+        settings_btn = ModernButton("⚙️", "Configuración")
+        settings_btn.setStyleSheet(settings_btn.styleSheet() + """
+            ModernButton {
+                background-color: rgba(255, 255, 255, 0.05);
+            }
+        """)
+        layout.addWidget(settings_btn)
+        
+    def add_nav_button(self, icon, text, index):
+        btn = ModernButton(icon, text)
+        btn.clicked.connect(lambda: self.switch_page(index))
+        self.buttons.append(btn)
+        self.layout().insertWidget(self.layout().count() - 2, btn)
+        
+        if index == 0:
+            btn.set_active(True)
+            
+    def switch_page(self, index):
+        for i, btn in enumerate(self.buttons):
+            btn.set_active(i == index)
+        self.current_index = index
+        self.page_changed.emit(index)
+
+
+class ModernCard(QFrame):
+    """Tarjeta con efecto acrílico de Windows 11"""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setStyleSheet("""
+            ModernCard {
+                background-color: rgba(255, 255, 255, 0.05);
+                border: 1px solid rgba(255, 255, 255, 0.1);
+                border-radius: 12px;
+                padding: 16px;
+            }
+        """)
+        
+        # Efecto de sombra
+        shadow = QGraphicsDropShadowEffect(self)
+        shadow.setBlurRadius(20)
+        shadow.setColor(QColor(0, 0, 0, 60))
+        shadow.setOffset(0, 4)
+        self.setGraphicsEffect(shadow)
+
 
 class MainWindow(QMainWindow):
     def __init__(self, config):
-        """
-        Initialize the main window and all core components.
-        
-        Args:
-            config (dict): The application configuration dictionary.
-        """
         super().__init__()
         self.config = config
         self.setWindowTitle(f"{config['app']['name']} v{config['app']['version']}")
         self.setWindowIcon(QIcon(config['app']['logo']))
-        self.setGeometry(100, 100, 1200, 800)
+        self.setGeometry(100, 100, 1400, 900)
         
-        self.processing_interval = 0.5  # seconds
-        # Initialize core components
+        self.processing_interval = 0.5
+        
+        # Inicializar componentes core
         self.face_detector = FaceDetector(config)
         self.camera_manager = CameraManager('config/camera_config.yaml')
         self.alert_system = AlertSystem(config)
         self.database = FaceDatabase(config['app']['database_path'])
         
-        # Load known faces
         self.face_detector.load_known_faces(config['app']['known_faces_dir'])
         
-        # UI Components
+        # Configurar tema oscuro
+        self.setup_theme()
+        
+        # UI
         self.init_ui()
         
-        # Start camera threads
+        # Iniciar cámaras
         self.camera_manager.start_all_cameras()
         
-        # Setup update timer
+        # Timer de actualización
         self.update_timer = QTimer(self)
         self.update_timer.timeout.connect(self.update)
-        self.update_timer.start(30)  # ~30 FPS
+        self.update_timer.start(30)
         
-        # Track last processed time per camera to limit processing
         self.last_processed: Dict[int, float] = {}
         
+    def setup_theme(self):
+        """Configurar tema oscuro estilo Windows 11"""
+        self.setStyleSheet("""
+            QMainWindow {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                    stop:0 #1a1a2e,
+                    stop:1 #16213e);
+            }
+            QLabel {
+                color: white;
+            }
+            QScrollArea {
+                border: none;
+                background-color: transparent;
+            }
+            QPushButton {
+                background-color: rgba(0, 120, 212, 0.8);
+                color: white;
+                border: none;
+                border-radius: 6px;
+                padding: 10px 20px;
+                font-size: 13px;
+                font-weight: 500;
+            }
+            QPushButton:hover {
+                background-color: rgba(0, 120, 212, 1);
+            }
+            QPushButton:pressed {
+                background-color: rgba(0, 100, 180, 1);
+            }
+            QComboBox {
+                background-color: rgba(255, 255, 255, 0.08);
+                color: white;
+                border: 1px solid rgba(255, 255, 255, 0.15);
+                border-radius: 6px;
+                padding: 8px 12px;
+                font-size: 13px;
+            }
+            QComboBox:hover {
+                background-color: rgba(255, 255, 255, 0.12);
+            }
+            QComboBox::drop-down {
+                border: none;
+                width: 30px;
+            }
+            QComboBox QAbstractItemView {
+                background-color: rgba(32, 32, 42, 0.98);
+                color: white;
+                border: 1px solid rgba(255, 255, 255, 0.15);
+                selection-background-color: rgba(0, 120, 212, 0.5);
+                border-radius: 6px;
+                padding: 4px;
+            }
+            QSlider::groove:horizontal {
+                background-color: rgba(255, 255, 255, 0.1);
+                height: 4px;
+                border-radius: 2px;
+            }
+            QSlider::handle:horizontal {
+                background-color: #0078d4;
+                width: 16px;
+                height: 16px;
+                margin: -6px 0;
+                border-radius: 8px;
+            }
+            QSlider::handle:horizontal:hover {
+                background-color: #1e90ff;
+            }
+            QSpinBox {
+                background-color: rgba(255, 255, 255, 0.08);
+                color: white;
+                border: 1px solid rgba(255, 255, 255, 0.15);
+                border-radius: 6px;
+                padding: 8px 12px;
+                font-size: 13px;
+            }
+            QSpinBox:hover {
+                background-color: rgba(255, 255, 255, 0.12);
+            }
+        """)
+        
     def init_ui(self):
-        """
-        Set up the main user interface, including tabs, layouts, and status/menu bars.
-        """
-        # Central widget and main layout
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
-        main_layout = QVBoxLayout(central_widget)
         
-        # Create tab widget
-        self.tab_widget = QTabWidget()
-        main_layout.addWidget(self.tab_widget)
+        main_layout = QHBoxLayout(central_widget)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
         
-        # Add tabs
-        self.setup_monitor_tab()
-        self.setup_controls_tab()
-        self.setup_history_tab()
+        # Barra lateral
+        self.sidebar = SidebarWidget()
+        self.sidebar.page_changed.connect(self.switch_page)
+        main_layout.addWidget(self.sidebar)
         
-        # Status bar
-        self.status_bar = self.statusBar()
-        self.status_label = QLabel("Ready")
-        self.status_bar.addPermanentWidget(self.status_label)
+        # Área de contenido
+        self.content_stack = QStackedWidget()
+        main_layout.addWidget(self.content_stack)
         
-        # Menu bar
-        self.setup_menu_bar()
+        # Páginas
+        self.setup_monitor_page()
+        self.setup_controls_page()
+        self.setup_history_page()
+        self.setup_face_manager_page()
+        self.setup_alerts_page()
         
-    def setup_menu_bar(self):
-        """
-        Set up the application's menu bar with actions like exiting, opening tools, and toggling fullscreen.
-        """
-        menubar = self.menuBar()
+        # Status bar moderno
+        self.statusBar().setStyleSheet("""
+            QStatusBar {
+                background-color: rgba(32, 32, 42, 0.8);
+                color: rgba(255, 255, 255, 0.7);
+                border-top: 1px solid rgba(255, 255, 255, 0.1);
+                font-size: 12px;
+                padding: 4px 16px;
+            }
+        """)
+        self.status_label = QLabel("Sistema listo")
+        self.statusBar().addPermanentWidget(self.status_label)
         
-        # File menu
-        file_menu = menubar.addMenu('File')
+    def setup_monitor_page(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(32, 32, 32, 32)
+        layout.setSpacing(24)
         
-        exit_action = file_menu.addAction('Exit')
-        exit_action.triggered.connect(self.close)
+        # Título
+        title = QLabel("Monitor de Cámaras")
+        title.setStyleSheet("""
+            font-size: 28px;
+            font-weight: bold;
+            color: white;
+            margin-bottom: 8px;
+        """)
+        layout.addWidget(title)
         
-        # Tools menu
-        tools_menu = menubar.addMenu('Tools')
-        
-        face_manager_action = tools_menu.addAction('Face Manager')
-        face_manager_action.triggered.connect(self.open_face_manager)
-        
-        alert_panel_action = tools_menu.addAction('Alert Panel')
-        alert_panel_action.triggered.connect(self.open_alert_panel)
-        
-        # View menu
-        view_menu = menubar.addMenu('View')
-        
-        fullscreen_action = view_menu.addAction('Toggle Fullscreen')
-        fullscreen_action.triggered.connect(self.toggle_fullscreen)
-        
-    def setup_monitor_tab(self):
-        """
-        Set up the 'Monitor' tab which displays live camera feeds in a scrollable grid layout.
-        """
-
-        monitor_tab = QWidget()
-        self.tab_widget.addTab(monitor_tab, "Monitor")
-        
-        # Scroll area for camera feeds
+        # Scroll para cámaras
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("QScrollArea { background-color: transparent; }")
         
-        # Container for camera feeds
         self.camera_container = QWidget()
         self.camera_grid = QGridLayout(self.camera_container)
-        self.camera_grid.setSpacing(10)
+        self.camera_grid.setSpacing(20)
         
         scroll.setWidget(self.camera_container)
-        
-        # Layout for monitor tab
-        layout = QVBoxLayout(monitor_tab)
         layout.addWidget(scroll)
         
-        # Add camera labels
+        # Agregar labels de cámaras en tarjetas
         self.camera_labels = {}
         for cam_id in self.camera_manager.cameras:
-            label = QLabel()
-            label.setAlignment(Qt.AlignCenter)
-            label.setMinimumSize(400, 300)
-            self.camera_labels[cam_id] = label
-            self.camera_grid.addWidget(label, (cam_id // 2), (cam_id % 2))
+            card = ModernCard()
+            card_layout = QVBoxLayout(card)
+            card_layout.setContentsMargins(8, 8, 8, 8)
             
-    def setup_controls_tab(self):
-        """
-        Set up the 'Controls' tab, which allows users to start/stop cameras,
-        adjust recognition threshold, and modify processing intervals.
-        """
-        controls_tab = QWidget()
-        self.tab_widget.addTab(controls_tab, "Controls")
+            cam_label = QLabel()
+            cam_label.setAlignment(Qt.AlignCenter)
+            cam_label.setMinimumSize(500, 375)
+            cam_label.setStyleSheet("""
+                background-color: rgba(0, 0, 0, 0.3);
+                border-radius: 8px;
+            """)
+            
+            cam_title = QLabel(f"📹 Cámara {cam_id}")
+            cam_title.setStyleSheet("""
+                font-size: 14px;
+                font-weight: 600;
+                color: white;
+                padding: 8px;
+            """)
+            
+            card_layout.addWidget(cam_label)
+            card_layout.addWidget(cam_title)
+            
+            self.camera_labels[cam_id] = cam_label
+            self.camera_grid.addWidget(card, (cam_id // 2), (cam_id % 2))
         
-        layout = QVBoxLayout(controls_tab)
+        self.content_stack.addWidget(page)
         
-        # Camera controls
-        camera_group = QWidget()
-        camera_layout = QVBoxLayout(camera_group)
+    def setup_controls_page(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(32, 32, 32, 32)
+        layout.setSpacing(24)
         
-        camera_title = QLabel("Camera Controls")
-        camera_title.setAlignment(Qt.AlignCenter)
-        camera_layout.addWidget(camera_title)
+        # Título
+        title = QLabel("Panel de Control")
+        title.setStyleSheet("""
+            font-size: 28px;
+            font-weight: bold;
+            color: white;
+            margin-bottom: 8px;
+        """)
+        layout.addWidget(title)
         
-        # Camera selection combo
+        # Tarjeta de control de cámaras
+        camera_card = ModernCard()
+        camera_layout = QVBoxLayout(camera_card)
+        camera_layout.setSpacing(16)
+        
+        cam_title = QLabel("🎥 Control de Cámaras")
+        cam_title.setStyleSheet("font-size: 18px; font-weight: 600; color: white;")
+        camera_layout.addWidget(cam_title)
+        
         self.camera_combo = QComboBox()
         for cam_id, cam_config in self.camera_manager.cameras.items():
-            self.camera_combo.addItem(f"Camera {cam_id}: {cam_config.name}", cam_id)
+            self.camera_combo.addItem(f"Cámara {cam_id}: {cam_config.name}", cam_id)
         camera_layout.addWidget(self.camera_combo)
         
-        # Camera control buttons
         btn_layout = QHBoxLayout()
-        
-        self.start_btn = QPushButton("Start Camera")
+        self.start_btn = QPushButton("▶️ Iniciar")
         self.start_btn.clicked.connect(self.start_selected_camera)
-        btn_layout.addWidget(self.start_btn)
-        
-        self.stop_btn = QPushButton("Stop Camera")
+        self.stop_btn = QPushButton("⏸️ Detener")
         self.stop_btn.clicked.connect(self.stop_selected_camera)
+        btn_layout.addWidget(self.start_btn)
         btn_layout.addWidget(self.stop_btn)
-        
         camera_layout.addLayout(btn_layout)
         
-        # Recognition threshold control
+        layout.addWidget(camera_card)
+        
+        # Tarjeta de configuración
+        config_card = ModernCard()
+        config_layout = QVBoxLayout(config_card)
+        config_layout.setSpacing(16)
+        
+        config_title = QLabel("⚙️ Configuración de Reconocimiento")
+        config_title.setStyleSheet("font-size: 18px; font-weight: 600; color: white;")
+        config_layout.addWidget(config_title)
+        
+        # Threshold
         threshold_layout = QHBoxLayout()
-        threshold_label = QLabel("Recognition Threshold:")
+        threshold_label = QLabel("Umbral de Reconocimiento:")
+        threshold_label.setStyleSheet("color: rgba(255, 255, 255, 0.9);")
         threshold_layout.addWidget(threshold_label)
         
         self.threshold_slider = QSlider(Qt.Horizontal)
-        self.threshold_slider.setRange(50, 100)  # 0.5 to 1.0 in 0.01 increments
+        self.threshold_slider.setRange(50, 100)
         self.threshold_slider.setValue(int(self.config['recognition']['recognition_threshold'] * 100))
         self.threshold_slider.valueChanged.connect(self.update_threshold)
         threshold_layout.addWidget(self.threshold_slider)
         
         self.threshold_value = QLabel(f"{self.threshold_slider.value() / 100:.2f}")
+        self.threshold_value.setStyleSheet("color: #0078d4; font-weight: bold; min-width: 40px;")
         threshold_layout.addWidget(self.threshold_value)
         
-        camera_layout.addLayout(threshold_layout)
+        config_layout.addLayout(threshold_layout)
         
-        layout.addWidget(camera_group)
-        
-        # Processing interval control
-        interval_group = QWidget()
-        interval_layout = QHBoxLayout(interval_group)
-        
-        interval_label = QLabel("Processing Interval (ms):")
+        # Intervalo de procesamiento
+        interval_layout = QHBoxLayout()
+        interval_label = QLabel("Intervalo de Procesamiento (ms):")
+        interval_label.setStyleSheet("color: rgba(255, 255, 255, 0.9);")
         interval_layout.addWidget(interval_label)
         
         self.interval_spin = QSpinBox()
@@ -210,159 +477,135 @@ class MainWindow(QMainWindow):
         self.interval_spin.setValue(int(self.processing_interval * 1000))
         self.interval_spin.valueChanged.connect(self.update_processing_interval)
         interval_layout.addWidget(self.interval_spin)
+        interval_layout.addStretch()
         
-        layout.addWidget(interval_group)
+        config_layout.addLayout(interval_layout)
         
-        # Status display
-        status_group = QWidget()
-        status_layout = QVBoxLayout(status_group)
+        layout.addWidget(config_card)
         
-        status_title = QLabel("System Status")
-        status_title.setAlignment(Qt.AlignCenter)
+        # Tarjeta de estado
+        status_card = ModernCard()
+        status_layout = QVBoxLayout(status_card)
+        
+        status_title = QLabel("📊 Estado del Sistema")
+        status_title.setStyleSheet("font-size: 18px; font-weight: 600; color: white;")
         status_layout.addWidget(status_title)
         
-        self.status_display = QLabel("Loading status...")
+        self.status_display = QLabel("Cargando...")
         self.status_display.setWordWrap(True)
+        self.status_display.setStyleSheet("color: rgba(255, 255, 255, 0.8); font-size: 13px; line-height: 1.5;")
         status_layout.addWidget(self.status_display)
         
-        layout.addWidget(status_group)
+        layout.addWidget(status_card)
+        layout.addStretch()
         
-    def setup_history_tab(self):
-        """
-        Set up the 'History' tab, which displays historical records of recognized faces or alerts.
-        """
+        self.content_stack.addWidget(page)
+        
+    def setup_history_page(self):
         self.history_viewer = HistoryViewer(self.database, self.config)
-        self.tab_widget.addTab(self.history_viewer, "History")
+        self.content_stack.addWidget(self.history_viewer)
+        
+    def setup_face_manager_page(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(32, 32, 32, 32)
+        
+        title = QLabel("Administración de Rostros")
+        title.setStyleSheet("font-size: 28px; font-weight: bold; color: white; margin-bottom: 16px;")
+        layout.addWidget(title)
+        
+        btn = QPushButton("Abrir Administrador de Rostros")
+        btn.clicked.connect(self.open_face_manager)
+        btn.setFixedWidth(300)
+        layout.addWidget(btn)
+        layout.addStretch()
+        
+        self.content_stack.addWidget(page)
+        
+    def setup_alerts_page(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(32, 32, 32, 32)
+        
+        title = QLabel("Panel de Alertas")
+        title.setStyleSheet("font-size: 28px; font-weight: bold; color: white; margin-bottom: 16px;")
+        layout.addWidget(title)
+        
+        btn = QPushButton("Abrir Panel de Alertas")
+        btn.clicked.connect(self.open_alert_panel)
+        btn.setFixedWidth(300)
+        layout.addWidget(btn)
+        layout.addStretch()
+        
+        self.content_stack.addWidget(page)
+        
+    def switch_page(self, index):
+        self.content_stack.setCurrentIndex(index)
         
     def open_face_manager(self):
-        """
-        Open the face manager dialog to allow adding or removing known faces,
-        and reloads known faces into the face detector after closing the dialog.
-        """
         dialog = FaceManagerDialog(self.face_detector, self.config['app']['known_faces_dir'])
         dialog.exec_()
-        # Refresh known faces after dialog closes
         self.face_detector.load_known_faces(self.config['app']['known_faces_dir'])
         
     def open_alert_panel(self):
-        """
-        Open the alert panel dialog to view and manage triggered alerts.
-        """
         dialog = AlertPanel(self.alert_system)
         dialog.exec_()
         
-    def toggle_fullscreen(self):
-        """
-        Toggle the application's fullscreen mode.
-        """
-        if self.isFullScreen():
-            self.showNormal()
-        else:
-            self.showFullScreen()
-            
     def start_selected_camera(self):
-        """
-        Start the camera selected from the combo box.
-        Updates the status label upon success.
-        """
         cam_id = self.camera_combo.currentData()
         if self.camera_manager.start_camera(cam_id):
-            self.status_label.setText(f"Started camera {cam_id}")
+            self.status_label.setText(f"✅ Cámara {cam_id} iniciada")
             
     def stop_selected_camera(self):
-        """
-        Stop the camera selected from the combo box.
-        Updates the status label upon success.
-        """
         cam_id = self.camera_combo.currentData()
         if self.camera_manager.stop_camera(cam_id):
-            self.status_label.setText(f"Stopped camera {cam_id}")
+            self.status_label.setText(f"⏸️ Cámara {cam_id} detenida")
             
     def update_threshold(self, value):
-        """
-        Update the face recognition threshold used by the face detector.
-        
-        Args:
-            value (int): New threshold slider value (scaled to 0.0 - 1.0).
-        """
         threshold = value / 100
         self.face_detector.recognition_threshold = threshold
         self.threshold_value.setText(f"{threshold:.2f}")
         
     def update_processing_interval(self, value):
-        """
-        Update the interval (in seconds) for how frequently frames should be processed.
-        
-        Args:
-            value (int): Interval in milliseconds.
-        """
         self.processing_interval = value / 1000
         
     def update(self):
-        """
-        Main update loop called by the QTimer every ~30ms.
-        It fetches frames from cameras, processes them if the interval allows,
-        and displays them on the GUI. Also updates system status.
-        """
         try:
-            # Update camera feeds
             frames = self.camera_manager.get_all_frames()
             
             for cam_id, frame in frames.items():
                 if frame is None:
                     continue
                     
-                # Check if we should process this frame
                 current_time = time.time()
                 last_time = self.last_processed.get(cam_id, 0)
                 if current_time - last_time < self.processing_interval:
-                    # Just display the frame without processing
                     self.display_frame(cam_id, frame)
                     continue
                     
-                # Process the frame (face detection and recognition)
                 processed_frame, alert_triggered = self.process_frame(cam_id, frame)
-                
-                # Display the processed frame
                 self.display_frame(cam_id, processed_frame)
-                
-                # Update last processed time
                 self.last_processed[cam_id] = current_time
                 
-            # Update status display
             self.update_status()
             
         except Exception as e:
             logger.error(f"Error in update loop: {e}")
-            self.status_label.setText(f"Error: {str(e)}")
+            self.status_label.setText(f"❌ Error: {str(e)}")
             
     def process_frame(self, cam_id: int, frame: np.ndarray) -> Tuple[np.ndarray, bool]:
-        """
-        Process a video frame for face detection and recognition.
-
-        Args:
-            cam_id (int): ID of the camera providing the frame.
-            frame (np.ndarray): The frame to process.
-
-        Returns:
-            Tuple[np.ndarray, bool]: The processed frame and a boolean indicating if an alert was triggered.
-        """
         alert_triggered = False
         try:
-            # Detect faces
             faces = self.face_detector.detect_faces(frame)
             if not faces:
                 return frame, False
                 
-            # Recognize faces
             recognized_faces = self.face_detector.recognize_faces(faces)
             
-            # Draw face info and check for alerts
             for face, known_face, confidence in recognized_faces:
                 camera_name = self.camera_manager.cameras[cam_id].name
                 
                 if known_face:
-                    # Known face detected
                     frame = draw_face_info(
                         frame, face.bbox,
                         name=known_face.name,
@@ -373,21 +616,17 @@ class MainWindow(QMainWindow):
                         timestamp=time.time()
                     )
                     
-                    # Trigger alert
                     alert_event = self.alert_system.trigger_alert(
                         cam_id, camera_name,
                         known_face.name, face, confidence,
                         frame
                     )
                     alert_triggered = True
-                    
-                    # Log to database
                     self.database.log_face_event(alert_event)
                 else:
-                    # Unknown face
                     frame = draw_face_info(
                         frame, face.bbox,
-                        name="Unknown",
+                        name="Desconocido",
                         confidence=confidence,
                         camera_name=camera_name,
                         timestamp=time.time()
@@ -399,83 +638,50 @@ class MainWindow(QMainWindow):
         return frame, alert_triggered
         
     def display_frame(self, cam_id: int, frame: np.ndarray):
-        """
-        Display the processed frame in the corresponding camera view.
-
-        Args:
-            cam_id (int): ID of the camera.
-            frame (np.ndarray): Frame to display.
-        """
         try:
             if frame is None:
                 return
                 
-            # Convert to QPixmap and display
             pixmap = numpy_to_pixmap(frame)
-            self.camera_labels[cam_id].setPixmap(pixmap)
+            self.camera_labels[cam_id].setPixmap(
+                pixmap.scaled(self.camera_labels[cam_id].size(), 
+                             Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            )
             
         except Exception as e:
             logger.error(f"Error displaying frame: {e}")
             
     def update_status(self):
-        """
-        Update the application's status display with:
-        - Camera running/stopped status
-        - Known faces in the database
-        - Recent alerts (last 3)
-        """
         try:
             status_text = []
             
-            # Camera status
-            status_text.append("=== Camera Status ===")
+            status_text.append("📹 <b>Estado de Cámaras</b>")
             for cam_id, cam_config in self.camera_manager.cameras.items():
                 running = cam_id in self.camera_manager.capture_threads
-                status_text.append(
-                    f"Camera {cam_id} ({cam_config.name}): {'Running' if running else 'Stopped'}"
-                )
+                icon = "🟢" if running else "🔴"
+                status_text.append(f"{icon} Cámara {cam_id} ({cam_config.name}): {'Activa' if running else 'Detenida'}")
                 
-            # Face database status
-            status_text.append("\n=== Face Database ===")
-            status_text.append(f"Known faces: {len(self.face_detector.known_faces)}")
+            status_text.append("<br>👤 <b>Base de Datos</b>")
+            status_text.append(f"Rostros conocidos: {len(self.face_detector.known_faces)}")
             
-            # Alert status
-            status_text.append("\n=== Alerts ===")
+            status_text.append("<br>🔔 <b>Alertas Recientes</b>")
             recent_alerts = self.alert_system.get_recent_alerts(3)
             if recent_alerts:
                 for alert in recent_alerts:
                     time_str = time.strftime("%H:%M:%S", time.localtime(alert.timestamp))
-                    status_text.append(
-                        f"{time_str}: {alert.face_name} on {alert.camera_name} "
-                        f"(Confidence: {alert.confidence:.2f})"
-                    )
+                    status_text.append(f"• {time_str}: {alert.face_name} en {alert.camera_name} ({alert.confidence:.2f})")
             else:
-                status_text.append("No recent alerts")
+                status_text.append("Sin alertas recientes")
                 
-            self.status_display.setText("\n".join(status_text))
+            self.status_display.setText("<br>".join(status_text))
             
         except Exception as e:
             logger.error(f"Error updating status: {e}")
             
     def closeEvent(self, event):
-        """
-        Handle the application window close event.
-
-        Performs cleanup:
-        - Stops all camera threads
-        - Stops the UI update timer
-        - Saves configuration (if needed)
-        """
         try:
-            # Stop all cameras
             self.camera_manager.stop_all_cameras()
-            
-            # Stop update timer
             self.update_timer.stop()
-            
-            # Save configuration
-            # (Add configuration saving logic here if needed)
-            
             event.accept()
         except Exception as e:
             logger.error(f"Error during shutdown: {e}")
