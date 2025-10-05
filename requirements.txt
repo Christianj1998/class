@@ -19,3 +19,7 @@ onnxruntime==1.15.1
 # telegram-bot
 python-telegram-bot>=20.0
 requests>=2.28.0
+
+# Authentication & Security
+bcrypt>=4.0.1
+cryptography>=41.0.0

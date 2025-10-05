@@ -52,6 +52,10 @@ class ModernButton(QPushButton):
             ModernButton:pressed {{
                 background-color: rgba(255, 255, 255, 0.05);
             }}
+            ModernButton:disabled {{
+                background-color: transparent;
+                color: rgba(255, 255, 255, 0.3);
+            }}
         """)
         
     def set_active(self, active):
@@ -76,7 +80,6 @@ class SidebarWidget(QWidget):
     def setup_ui(self):
         self.setFixedWidth(280)
         
-        # Fondo con gradiente oscuro
         self.setStyleSheet("""
             SidebarWidget {
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
@@ -96,10 +99,7 @@ class SidebarWidget(QWidget):
         header_layout.setSpacing(8)
         
         logo_label = QLabel("🎥")
-        logo_label.setStyleSheet("""
-            font-size: 32px;
-            padding: 8px;
-        """)
+        logo_label.setStyleSheet("font-size: 32px; padding: 8px;")
         logo_label.setAlignment(Qt.AlignCenter)
         
         title_label = QLabel("Face Recognition")
@@ -141,20 +141,11 @@ class SidebarWidget(QWidget):
         
         layout.addStretch()
         
-        # Botón de configuración al final
-        settings_btn = ModernButton("⚙️", "Configuración")
-        settings_btn.setStyleSheet(settings_btn.styleSheet() + """
-            ModernButton {
-                background-color: rgba(255, 255, 255, 0.05);
-            }
-        """)
-        layout.addWidget(settings_btn)
-        
     def add_nav_button(self, icon, text, index):
         btn = ModernButton(icon, text)
         btn.clicked.connect(lambda: self.switch_page(index))
         self.buttons.append(btn)
-        self.layout().insertWidget(self.layout().count() - 2, btn)
+        self.layout().insertWidget(self.layout().count() - 1, btn)
         
         if index == 0:
             btn.set_active(True)
@@ -179,7 +170,6 @@ class ModernCard(QFrame):
             }
         """)
         
-        # Efecto de sombra
         shadow = QGraphicsDropShadowEffect(self)
         shadow.setBlurRadius(20)
         shadow.setColor(QColor(0, 0, 0, 60))
@@ -188,9 +178,12 @@ class ModernCard(QFrame):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, config):
+    def __init__(self, config, auth_manager, database):
         super().__init__()
         self.config = config
+        self.auth_manager = auth_manager
+        self.database_instance = database
+        
         self.setWindowTitle(f"{config['app']['name']} v{config['app']['version']}")
         self.setWindowIcon(QIcon(config['app']['logo']))
         self.setGeometry(100, 100, 1400, 900)
@@ -211,6 +204,12 @@ class MainWindow(QMainWindow):
         # UI
         self.init_ui()
         
+        # Aplicar permisos basados en rol
+        self.apply_permissions()
+        
+        # Mostrar usuario logueado
+        self.update_user_display()
+        
         # Iniciar cámaras
         self.camera_manager.start_all_cameras()
         
@@ -221,6 +220,91 @@ class MainWindow(QMainWindow):
         
         self.last_processed: Dict[int, float] = {}
         
+    def apply_permissions(self):
+        """Apply UI restrictions based on user role"""
+        user = self.auth_manager.get_current_user()
+        if not user:
+            return
+        
+        logger.info(f"Applying permissions for role: {user.role}")
+        
+        # Viewer: solo puede ver cámaras, sin control
+        if user.role == 'viewer':
+            # Deshabilitar controles de cámara
+            if hasattr(self, 'start_btn'):
+                self.start_btn.setEnabled(False)
+                self.start_btn.setToolTip("Permission denied: Viewers cannot control cameras")
+            if hasattr(self, 'stop_btn'):
+                self.stop_btn.setEnabled(False)
+                self.stop_btn.setToolTip("Permission denied: Viewers cannot control cameras")
+            
+            # Deshabilitar controles de configuración
+            if hasattr(self, 'threshold_slider'):
+                self.threshold_slider.setEnabled(False)
+            if hasattr(self, 'interval_spin'):
+                self.interval_spin.setEnabled(False)
+            
+            # Deshabilitar gestión de rostros
+            if hasattr(self, 'sidebar') and len(self.sidebar.buttons) > 3:
+                self.sidebar.buttons[3].setEnabled(False)
+                self.sidebar.buttons[3].setToolTip("Permission denied: Viewers cannot manage faces")
+        
+        # Operator: puede controlar cámaras y gestionar rostros
+        elif user.role == 'operator':
+            pass  # Tiene acceso a casi todo
+        
+        # Admin: acceso completo
+        elif user.role == 'admin':
+            pass  # Sin restricciones
+    
+    def update_user_display(self):
+        """Display current user info in status bar"""
+        user = self.auth_manager.get_current_user()
+        if user:
+            role_icons = {
+                'admin': '👑',
+                'operator': '⚙️',
+                'viewer': '👁️'
+            }
+            icon = role_icons.get(user.role, '👤')
+            user_info = QLabel(f"{icon} {user.username} ({user.role})")
+            user_info.setStyleSheet("color: rgba(255, 255, 255, 0.9); padding: 0 10px;")
+            self.statusBar().addPermanentWidget(user_info)
+            
+            # Botón de logout
+            logout_btn = QPushButton("Logout")
+            logout_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: rgba(220, 53, 69, 0.8);
+                    color: white;
+                    border: none;
+                    border-radius: 4px;
+                    padding: 4px 12px;
+                    font-size: 11px;
+                }
+                QPushButton:hover {
+                    background-color: rgba(220, 53, 69, 1);
+                }
+            """)
+            logout_btn.clicked.connect(self.handle_logout)
+            self.statusBar().addPermanentWidget(logout_btn)
+    
+    def handle_logout(self):
+        """Handle user logout"""
+        reply = QMessageBox.question(
+            self,
+            "Confirm Logout",
+            "Are you sure you want to logout?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        
+        if reply == QMessageBox.Yes:
+            user = self.auth_manager.get_current_user()
+            if user:
+                logger.info(f"User {user.username} logged out")
+            self.close()
+
     def setup_theme(self):
         """Configurar tema oscuro estilo Windows 11"""
         self.setStyleSheet("""
@@ -250,6 +334,10 @@ class MainWindow(QMainWindow):
             }
             QPushButton:pressed {
                 background-color: rgba(0, 100, 180, 1);
+            }
+            QPushButton:disabled {
+                background-color: rgba(0, 120, 212, 0.3);
+                color: rgba(255, 255, 255, 0.4);
             }
             QComboBox {
                 background-color: rgba(255, 255, 255, 0.08);
@@ -337,7 +425,7 @@ class MainWindow(QMainWindow):
             }
         """)
         self.status_label = QLabel("Sistema listo")
-        self.statusBar().addPermanentWidget(self.status_label)
+        self.statusBar().addWidget(self.status_label)
         
     def setup_monitor_page(self):
         page = QWidget()
@@ -509,15 +597,37 @@ class MainWindow(QMainWindow):
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(32, 32, 32, 32)
+        layout.setSpacing(20)
         
         title = QLabel("Administración de Rostros")
         title.setStyleSheet("font-size: 28px; font-weight: bold; color: white; margin-bottom: 16px;")
         layout.addWidget(title)
         
-        btn = QPushButton("Abrir Administrador de Rostros")
-        btn.clicked.connect(self.open_face_manager)
-        btn.setFixedWidth(300)
-        layout.addWidget(btn)
+        btn_layout = QHBoxLayout()
+        
+        face_btn = QPushButton("Gestionar Rostros Conocidos")
+        face_btn.clicked.connect(self.open_face_manager)
+        face_btn.setFixedWidth(300)
+        btn_layout.addWidget(face_btn)
+        
+        # Botón de gestión de usuarios (solo admin)
+        user = self.auth_manager.get_current_user()
+        if user and user.role == 'admin':
+            user_btn = QPushButton("Gestionar Usuarios")
+            user_btn.clicked.connect(self.open_user_manager)
+            user_btn.setFixedWidth(300)
+            user_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: rgba(108, 92, 231, 0.8);
+                }
+                QPushButton:hover {
+                    background-color: rgba(108, 92, 231, 1);
+                }
+            """)
+            btn_layout.addWidget(user_btn)
+        
+        btn_layout.addStretch()
+        layout.addLayout(btn_layout)
         layout.addStretch()
         
         self.content_stack.addWidget(page)
@@ -543,9 +653,31 @@ class MainWindow(QMainWindow):
         self.content_stack.setCurrentIndex(index)
         
     def open_face_manager(self):
+        if not self.auth_manager.has_permission('operator'):
+            QMessageBox.warning(
+                self,
+                "Permission Denied",
+                "Only operators and administrators can manage faces."
+            )
+            return
+        
         dialog = FaceManagerDialog(self.face_detector, self.config['app']['known_faces_dir'])
         dialog.exec_()
         self.face_detector.load_known_faces(self.config['app']['known_faces_dir'])
+    
+    def open_user_manager(self):
+        """Open user management dialog (admin only)"""
+        if not self.auth_manager.has_permission('admin'):
+            QMessageBox.warning(
+                self,
+                "Permission Denied",
+                "Only administrators can manage users."
+            )
+            return
+        
+        from ui.user_management import UserManagementDialog
+        dialog = UserManagementDialog(self.database, self.auth_manager, self)
+        dialog.exec_()
         
     def open_alert_panel(self):
         dialog = AlertPanel(self.alert_system)
@@ -571,6 +703,17 @@ class MainWindow(QMainWindow):
         
     def update(self):
         try:
+            # Check if session is still valid
+            if not self.auth_manager.is_authenticated():
+                logger.warning("Session expired, closing application")
+                QMessageBox.warning(
+                    self,
+                    "Session Expired",
+                    "Your session has expired. Please login again."
+                )
+                self.close()
+                return
+            
             frames = self.camera_manager.get_all_frames()
             
             for cam_id, frame in frames.items():
@@ -622,7 +765,13 @@ class MainWindow(QMainWindow):
                         frame
                     )
                     alert_triggered = True
-                    self.database.log_face_event(alert_event)
+                    
+                    # Incluir user_id en el log
+                    user = self.auth_manager.get_current_user()
+                    self.database.log_face_event(
+                        alert_event,
+                        user_id=user.id if user else None
+                    )
                 else:
                     frame = draw_face_info(
                         frame, face.bbox,
@@ -655,7 +804,12 @@ class MainWindow(QMainWindow):
         try:
             status_text = []
             
-            status_text.append("📹 <b>Estado de Cámaras</b>")
+            # User info
+            user = self.auth_manager.get_current_user()
+            if user:
+                status_text.append(f"👤 <b>Logged in as:</b> {user.username} ({user.role})")
+            
+            status_text.append("<br>📹 <b>Estado de Cámaras</b>")
             for cam_id, cam_config in self.camera_manager.cameras.items():
                 running = cam_id in self.camera_manager.capture_threads
                 icon = "🟢" if running else "🔴"
@@ -680,6 +834,10 @@ class MainWindow(QMainWindow):
             
     def closeEvent(self, event):
         try:
+            user = self.auth_manager.get_current_user()
+            if user:
+                logger.info(f"Application closing - User: {user.username}")
+            
             self.camera_manager.stop_all_cameras()
             self.update_timer.stop()
             event.accept()

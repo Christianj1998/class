@@ -1,6 +1,6 @@
 import sqlite3
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List, Optional, Dict
 from pathlib import Path
 from loguru import logger
 import time
@@ -16,9 +16,9 @@ class FaceLogEntry:
     gender: Optional[str]
     confidence: float
     screenshot_path: Optional[str]
+    user_id: Optional[int] = None  # Usuario que estaba logueado
 
     def __post_init__(self):
-        # Convert timestamp to float if it comes as bytes
         if isinstance(self.timestamp, bytes):
             self.timestamp = float(self.timestamp.decode('utf-8'))
         elif isinstance(self.timestamp, str):
@@ -37,7 +37,23 @@ class FaceDatabase:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
                 
-                # Create face_logs table
+                # Create users table
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS users (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        username TEXT NOT NULL UNIQUE,
+                        email TEXT NOT NULL UNIQUE,
+                        password_hash TEXT NOT NULL,
+                        role TEXT NOT NULL DEFAULT 'viewer',
+                        is_active BOOLEAN NOT NULL DEFAULT 1,
+                        created_at REAL NOT NULL,
+                        last_login REAL,
+                        created_by INTEGER,
+                        FOREIGN KEY (created_by) REFERENCES users(id)
+                    )
+                ''')
+                
+                # Create face_logs table (updated)
                 cursor.execute('''
                     CREATE TABLE IF NOT EXISTS face_logs (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -48,7 +64,9 @@ class FaceDatabase:
                         age INTEGER,
                         gender TEXT,
                         confidence REAL NOT NULL,
-                        screenshot_path TEXT
+                        screenshot_path TEXT,
+                        user_id INTEGER,
+                        FOREIGN KEY (user_id) REFERENCES users(id)
                     )
                 ''')
                 
@@ -59,9 +77,39 @@ class FaceDatabase:
                         name TEXT NOT NULL UNIQUE,
                         embedding BLOB NOT NULL,
                         image_path TEXT NOT NULL,
-                        created_at REAL NOT NULL
+                        created_at REAL NOT NULL,
+                        created_by INTEGER,
+                        FOREIGN KEY (created_by) REFERENCES users(id)
                     )
                 ''')
+                
+                # Create audit_log table
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS audit_log (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        timestamp REAL NOT NULL,
+                        user_id INTEGER NOT NULL,
+                        action TEXT NOT NULL,
+                        details TEXT,
+                        FOREIGN KEY (user_id) REFERENCES users(id)
+                    )
+                ''')
+                
+                # Create default admin user if no users exist
+                cursor.execute('SELECT COUNT(*) FROM users')
+                if cursor.fetchone()[0] == 0:
+                    import bcrypt
+                    default_password = "admin123"
+                    salt = bcrypt.gensalt()
+                    hashed = bcrypt.hashpw(default_password.encode('utf-8'), salt)
+                    
+                    cursor.execute('''
+                        INSERT INTO users (username, email, password_hash, role, created_at)
+                        VALUES (?, ?, ?, ?, ?)
+                    ''', ('admin', 'admin@system.local', hashed.decode('utf-8'), 'admin', time.time()))
+                    
+                    logger.warning("Default admin user created - username: 'admin', password: 'admin123'")
+                    logger.warning("CHANGE THIS PASSWORD IMMEDIATELY!")
                 
                 conn.commit()
                 logger.success("Database initialized successfully")
@@ -70,16 +118,201 @@ class FaceDatabase:
             logger.error(f"Error initializing database: {e}")
             raise
 
-    def log_face_event(self, event) -> int:
-        """Log a face recognition event to the database"""
+    # ============ USER MANAGEMENT ============
+    
+    def create_user(self, username: str, email: str, password_hash: str, 
+                   role: str = 'viewer', created_by: Optional[int] = None) -> Optional[int]:
+        """Create a new user"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    INSERT INTO users (username, email, password_hash, role, created_at, created_by)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                ''', (username, email, password_hash, role, time.time(), created_by))
+                conn.commit()
+                user_id = cursor.lastrowid
+                
+                # Log audit
+                if created_by:
+                    self.log_audit(created_by, 'create_user', f"Created user: {username}")
+                
+                return user_id
+        except sqlite3.IntegrityError as e:
+            logger.error(f"User already exists: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"Error creating user: {e}")
+            return None
+    
+    def get_user_by_username(self, username: str) -> Optional[Dict]:
+        """Get user by username"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT * FROM users WHERE username = ?
+                ''', (username,))
+                row = cursor.fetchone()
+                return dict(row) if row else None
+        except Exception as e:
+            logger.error(f"Error getting user: {e}")
+            return None
+    
+    def get_user_by_id(self, user_id: int) -> Optional[Dict]:
+        """Get user by ID"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT * FROM users WHERE id = ?
+                ''', (user_id,))
+                row = cursor.fetchone()
+                return dict(row) if row else None
+        except Exception as e:
+            logger.error(f"Error getting user: {e}")
+            return None
+    
+    def get_all_users(self) -> List[Dict]:
+        """Get all users"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT id, username, email, role, is_active, created_at, last_login
+                    FROM users
+                    ORDER BY username
+                ''')
+                return [dict(row) for row in cursor.fetchall()]
+        except Exception as e:
+            logger.error(f"Error getting users: {e}")
+            return []
+    
+    def update_user(self, user_id: int, **kwargs) -> bool:
+        """Update user fields"""
+        try:
+            allowed_fields = ['email', 'role', 'is_active']
+            updates = {k: v for k, v in kwargs.items() if k in allowed_fields}
+            
+            if not updates:
+                return False
+            
+            set_clause = ', '.join([f"{k} = ?" for k in updates.keys()])
+            values = list(updates.values()) + [user_id]
+            
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute(f'''
+                    UPDATE users SET {set_clause} WHERE id = ?
+                ''', values)
+                conn.commit()
+                return cursor.rowcount > 0
+        except Exception as e:
+            logger.error(f"Error updating user: {e}")
+            return False
+    
+    def update_user_password(self, user_id: int, password_hash: str) -> bool:
+        """Update user password"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    UPDATE users SET password_hash = ? WHERE id = ?
+                ''', (password_hash, user_id))
+                conn.commit()
+                return cursor.rowcount > 0
+        except Exception as e:
+            logger.error(f"Error updating password: {e}")
+            return False
+    
+    def update_last_login(self, user_id: int) -> bool:
+        """Update last login timestamp"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    UPDATE users SET last_login = ? WHERE id = ?
+                ''', (time.time(), user_id))
+                conn.commit()
+                return True
+        except Exception as e:
+            logger.error(f"Error updating last login: {e}")
+            return False
+    
+    def delete_user(self, user_id: int) -> bool:
+        """Delete user (soft delete - sets is_active to False)"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    UPDATE users SET is_active = 0 WHERE id = ?
+                ''', (user_id,))
+                conn.commit()
+                return cursor.rowcount > 0
+        except Exception as e:
+            logger.error(f"Error deleting user: {e}")
+            return False
+    
+    # ============ AUDIT LOG ============
+    
+    def log_audit(self, user_id: int, action: str, details: Optional[str] = None):
+        """Log user action for audit trail"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    INSERT INTO audit_log (timestamp, user_id, action, details)
+                    VALUES (?, ?, ?, ?)
+                ''', (time.time(), user_id, action, details))
+                conn.commit()
+        except Exception as e:
+            logger.error(f"Error logging audit: {e}")
+    
+    def get_audit_logs(self, user_id: Optional[int] = None, limit: int = 100) -> List[Dict]:
+        """Get audit logs"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.cursor()
+                
+                if user_id:
+                    cursor.execute('''
+                        SELECT a.*, u.username 
+                        FROM audit_log a
+                        JOIN users u ON a.user_id = u.id
+                        WHERE a.user_id = ?
+                        ORDER BY a.timestamp DESC
+                        LIMIT ?
+                    ''', (user_id, limit))
+                else:
+                    cursor.execute('''
+                        SELECT a.*, u.username 
+                        FROM audit_log a
+                        JOIN users u ON a.user_id = u.id
+                        ORDER BY a.timestamp DESC
+                        LIMIT ?
+                    ''', (limit,))
+                
+                return [dict(row) for row in cursor.fetchall()]
+        except Exception as e:
+            logger.error(f"Error getting audit logs: {e}")
+            return []
+
+    # ============ FACE LOGS (Updated) ============
+    
+    def log_face_event(self, event, user_id: Optional[int] = None) -> int:
+        """Log a face recognition event"""
         try:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
                 cursor.execute('''
                     INSERT INTO face_logs (
                         timestamp, camera_id, camera_name, face_name,
-                        age, gender, confidence, screenshot_path
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        age, gender, confidence, screenshot_path, user_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (
                     float(event.timestamp),
                     int(event.camera_id),
@@ -88,11 +321,11 @@ class FaceDatabase:
                     int(event.age) if event.age else None,
                     str(event.gender) if event.gender else None,
                     float(event.confidence),
-                    str(event.screenshot_path) if event.screenshot_path else None
+                    str(event.screenshot_path) if event.screenshot_path else None,
+                    user_id
                 ))
                 conn.commit()
                 return cursor.lastrowid
-                
         except Exception as e:
             logger.error(f"Error logging face event: {e}")
             raise
@@ -105,7 +338,8 @@ class FaceDatabase:
         """Retrieve face logs with optional filters"""
         try:
             query = '''
-                SELECT id, timestamp, camera_id, camera_name, face_name, age, gender, confidence, screenshot_path
+                SELECT id, timestamp, camera_id, camera_name, face_name, 
+                       age, gender, confidence, screenshot_path, user_id
                 FROM face_logs
             '''
             params = []
@@ -141,7 +375,6 @@ class FaceDatabase:
                 entries = []
                 for row in cursor.fetchall():
                     try:
-                        # Convert all values to proper types
                         entries.append(FaceLogEntry(
                             id=row['id'],
                             timestamp=float(row['timestamp']),
@@ -151,7 +384,8 @@ class FaceDatabase:
                             age=row['age'],
                             gender=row['gender'],
                             confidence=float(row['confidence']),
-                            screenshot_path=row['screenshot_path']
+                            screenshot_path=row['screenshot_path'],
+                            user_id=row['user_id']
                         ))
                     except Exception as e:
                         logger.error(f"Error converting row {dict(row)}: {e}")
@@ -163,16 +397,23 @@ class FaceDatabase:
             logger.error(f"Error retrieving face logs: {e}")
             return []
 
-    def add_known_face(self, name: str, embedding: bytes, image_path: str) -> bool:
+    # ============ KNOWN FACES (Updated) ============
+    
+    def add_known_face(self, name: str, embedding: bytes, image_path: str, 
+                      created_by: Optional[int] = None) -> bool:
         """Add a known face to the database"""
         try:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
                 cursor.execute('''
-                    INSERT INTO known_faces (name, embedding, image_path, created_at)
-                    VALUES (?, ?, ?, ?)
-                ''', (name, embedding, image_path, time.time()))
+                    INSERT INTO known_faces (name, embedding, image_path, created_at, created_by)
+                    VALUES (?, ?, ?, ?, ?)
+                ''', (name, embedding, image_path, time.time(), created_by))
                 conn.commit()
+                
+                if created_by:
+                    self.log_audit(created_by, 'add_face', f"Added face: {name}")
+                
                 return True
         except sqlite3.IntegrityError:
             logger.warning(f"Face with name '{name}' already exists")
@@ -198,7 +439,7 @@ class FaceDatabase:
             logger.error(f"Error retrieving known faces: {e}")
             return []
 
-    def delete_known_face(self, name: str) -> bool:
+    def delete_known_face(self, name: str, deleted_by: Optional[int] = None) -> bool:
         """Delete a known face from the database"""
         try:
             with sqlite3.connect(self.db_path) as conn:
@@ -207,6 +448,10 @@ class FaceDatabase:
                     DELETE FROM known_faces WHERE name = ?
                 ''', (name,))
                 conn.commit()
+                
+                if deleted_by and cursor.rowcount > 0:
+                    self.log_audit(deleted_by, 'delete_face', f"Deleted face: {name}")
+                
                 return cursor.rowcount > 0
         except Exception as e:
             logger.error(f"Error deleting known face: {e}")

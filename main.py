@@ -1,49 +1,41 @@
 """
-Multi-Camera Face Tracker System
+Multi-Camera Face Tracker System with Authentication
 --------------------------------
-This is the main entry point for launching the facial recognition and tracking application.
-It initializes the GUI, camera streams, face detection, recognition, alert system, and database.
+Main entry point with login system and user management.
 
 Features:
-- Real-time face detection and recognition across multiple camera feeds
-- Target face matching with alert notification
-- Event logging with timestamp and screenshot
-- User-friendly desktop UI built with PyQt5
+- User authentication with role-based access control
+- Real-time face detection and recognition across multiple cameras
+- Alert notification system
+- Event logging with user tracking
+- Secure password hashing with bcrypt
 
-Author: Darshan Vichhi (Aarambh Dev Hub)
+Author: Enhanced with Authentication System
 Created: 2025-05-21
+Updated: 2025-10-05
 """
-
-
 
 import sys
 import yaml
 from pathlib import Path
 from loguru import logger
-from PyQt5.QtWidgets import QApplication, QSplashScreen
+from PyQt5.QtWidgets import QApplication, QSplashScreen, QMessageBox
 from PyQt5.QtGui import QPixmap
 from PyQt5.QtCore import Qt, QTimer
 
 from ui.main_window import MainWindow
+from ui.login_window import LoginWindow
+from core.auth_manager import AuthManager
 
 def load_config(config_path: str) -> dict:
     """
-    Load the application's configuration from a YAML file.
-
+    Load application configuration from YAML file.
+    
     Args:
-        config_path (str): Path to the configuration file.
-
+        config_path: Path to config.yaml
+        
     Returns:
-        dict: Parsed configuration settings as a dictionary.
-
-    Side Effects:
-        - Creates necessary directories for screenshots, known faces, and logs if they do not exist.
-
-    Raises:
-        Exception: If the configuration file cannot be read or parsed.
-
-    Usage:
-        config = load_config('config/config.yaml')
+        Configuration dictionary
     """
     try:
         with open(config_path, 'r') as f:
@@ -61,21 +53,10 @@ def load_config(config_path: str) -> dict:
 
 def setup_logging(log_dir: str):
     """
-    Initialize application logging using loguru.
-
+    Initialize application logging with loguru.
+    
     Args:
-        log_dir (str): Directory where log files should be stored.
-
-    Behavior:
-        - Creates rotating log files for general logs and error logs.
-        - Retains log history for maintenance and debugging.
-
-    Log Files:
-        - app.log (INFO level, rotated every 10MB, kept for 7 days)
-        - error.log (ERROR level, rotated every 10MB, kept for 30 days)
-
-    Usage:
-        setup_logging(config['app']['log_dir'])
+        log_dir: Directory for log files
     """
     logger.add(
         f"{log_dir}/app.log",
@@ -89,15 +70,19 @@ def setup_logging(log_dir: str):
         retention="30 days",
         level="ERROR"
     )
-
+    logger.add(
+        f"{log_dir}/security.log",
+        rotation="10 MB",
+        retention="90 days",
+        level="WARNING",
+        filter=lambda record: "auth" in record["extra"] or "security" in record["extra"]
+    )
 
 def show_splash_screen(config: dict) -> QSplashScreen:
     """Create and display splash screen with logo"""
     try:
-        # Get logo path from config with fallback
         logo_path = config.get('app', {}).get('logo', 'assets/logo.png')
         
-        # Verify logo exists
         if not Path(logo_path).exists():
             raise FileNotFoundError(f"Logo file not found: {logo_path}")
         
@@ -113,28 +98,24 @@ def show_splash_screen(config: dict) -> QSplashScreen:
             Qt.AlignBottom | Qt.AlignCenter,
             Qt.white
         )
-        QApplication.processEvents()  # Force UI update
+        QApplication.processEvents()
         
         return splash
         
     except Exception as e:
-        print(f"Error loading splash screen: {e}")
-        # Fallback to blank splash if logo fails
+        logger.warning(f"Error loading splash screen: {e}")
         return QSplashScreen(QPixmap(800, 400))
-
 
 def main():
     """
-    Main entry point of the Multi-Camera Face Tracker System.
-
-    Behavior:
-        - Loads application configuration from YAML.
-        - Sets up logging to file.
-        - Initializes and launches the PyQt5 user interface.
-        - Starts the event loop for the desktop application.
-
-    Error Handling:
-        - Logs critical error and exits gracefully if any part of initialization fails.
+    Main entry point with authentication.
+    
+    Flow:
+    1. Load configuration and setup logging
+    2. Initialize database and auth manager
+    3. Show login window
+    4. On successful login, show main application
+    5. Maintain user session throughout
     """
     try:
         # Load configuration
@@ -142,46 +123,99 @@ def main():
         
         # Setup logging
         setup_logging(config['app']['log_dir'])
+        logger.info("=" * 60)
+        logger.info("Application starting...")
         
-        # Create and run application
+        # Create application
         app = QApplication(sys.argv)
-
+        app.setApplicationName(config['app']['name'])
+        app.setApplicationVersion(config['app']['version'])
+        
+        # Show splash screen
         splash = show_splash_screen(config)
         splash.show()
-
         app.processEvents()
-
-        window = MainWindow(config)
         
-        def show_ai_loading():
-            splash.showMessage(
-                "Loading AI Models...",
-                Qt.AlignBottom | Qt.AlignCenter,
-                Qt.white
+        # Initialize database (creates tables if needed)
+        from core.database import FaceDatabase
+        database = FaceDatabase(config['app']['database_path'])
+        
+        # Initialize authentication manager
+        auth_manager = AuthManager(database)
+        
+        splash.showMessage(
+            "Loading authentication system...",
+            Qt.AlignBottom | Qt.AlignCenter,
+            Qt.white
+        )
+        app.processEvents()
+        
+        # Show login window
+        splash.finish(None)
+        login_window = LoginWindow(auth_manager, config)
+        
+        if login_window.exec_() != LoginWindow.Accepted:
+            logger.info("Login cancelled by user")
+            return 0
+        
+        # Get authenticated user
+        current_user = auth_manager.get_current_user()
+        if not current_user:
+            logger.error("No authenticated user after login")
+            QMessageBox.critical(
+                None, 
+                "Authentication Error", 
+                "Failed to establish user session"
             )
-            QApplication.processEvents()
-            
-            # Setup final close timer
-            QTimer.singleShot(1500, lambda: splash.finish(window))
+            return 1
         
-        # Initial delay before showing AI message
-        QTimer.singleShot(2000, show_ai_loading)
-
-        QTimer.singleShot(3500, lambda: window.show())
-
-
-        logger.info("Application started successfully")
+        logger.info(f"User '{current_user.username}' (role: {current_user.role}) logged in successfully")
+        
+        # Show splash again for main app initialization
+        splash.show()
+        splash.showMessage(
+            "Loading AI Models...",
+            Qt.AlignBottom | Qt.AlignCenter,
+            Qt.white
+        )
+        app.processEvents()
+        
+        # Initialize main window with authenticated user
+        window = MainWindow(config, auth_manager, database)
+        
+        # Setup final close timer
+        def show_main_window():
+            splash.finish(window)
+            window.show()
+            logger.info("Main application window shown")
+        
+        QTimer.singleShot(2000, show_main_window)
+        
+        # Handle application close
         def on_close():
-            window.camera_manager.stop_all_cameras()
-            window.alert_system.shutdown()
-            app.quit()
-            
+            try:
+                logger.info(f"User '{current_user.username}' logging out")
+                window.camera_manager.stop_all_cameras()
+                window.alert_system.shutdown()
+                auth_manager.logout()
+                logger.info("Application shutdown complete")
+            except Exception as e:
+                logger.error(f"Error during shutdown: {e}")
+            finally:
+                app.quit()
+        
         app.aboutToQuit.connect(on_close)
-
+        
+        # Start event loop
         sys.exit(app.exec_())
         
     except Exception as e:
         logger.critical(f"Application failed to start: {e}")
+        QMessageBox.critical(
+            None,
+            "Critical Error",
+            f"Application failed to start:\n\n{str(e)}\n\nCheck logs for details."
+        )
         sys.exit(1)
 
 if __name__ == "__main__":
