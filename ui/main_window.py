@@ -1,5 +1,6 @@
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, Future
 from PyQt5.QtWidgets import (QMainWindow, QApplication, QWidget, QVBoxLayout, QHBoxLayout,
                             QLabel, QPushButton, QTabWidget, QScrollArea, QGridLayout,
                             QMessageBox, QFileDialog, QComboBox, QSlider, QSpinBox,
@@ -23,7 +24,7 @@ from ui.history_viewer import HistoryViewer
 
 
 class ModernButton(QPushButton):
-    """Botón estilo Windows 11 con efectos hover"""
+    """Botones modernos"""
     def __init__(self, icon_text="", text="", parent=None):
         super().__init__(parent)
         self.icon_text = icon_text
@@ -31,6 +32,10 @@ class ModernButton(QPushButton):
         self.is_active = False
         self.setMinimumHeight(50)
         self.setCursor(Qt.PointingHandCursor)
+        self.update_style()
+        
+        super().setText(f"{self.icon_text}  {self.button_text}")
+        
         self.update_style()
         
     def update_style(self):
@@ -64,7 +69,7 @@ class ModernButton(QPushButton):
         
     def setText(self, text):
         self.button_text = text
-        super().setText(f"  {self.icon_text}  {text}")
+        super().setText(f"  {self.icon_text} {self.button_text}")
 
 
 class SidebarWidget(QWidget):
@@ -178,6 +183,9 @@ class ModernCard(QFrame):
 
 
 class MainWindow(QMainWindow):
+    # Signal para actualización de frames procesados
+    frame_processed = pyqtSignal(int, np.ndarray)
+    
     def __init__(self, config, auth_manager, database):
         super().__init__()
         self.config = config
@@ -190,6 +198,14 @@ class MainWindow(QMainWindow):
         
         self.processing_interval = 0.5
         
+        # Thread pool para procesamiento paralelo
+        self.executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="FrameProcessor")
+        self.processing_futures: Dict[int, Future] = {}
+        
+        # Cache de frames procesados
+        self.processed_frames_cache: Dict[int, Tuple[np.ndarray, float]] = {}
+        self.cache_timeout = 0.1  # 100ms cache
+        
         # Inicializar componentes core
         self.face_detector = FaceDetector(config)
         self.camera_manager = CameraManager('config/camera_config.yaml')
@@ -197,6 +213,9 @@ class MainWindow(QMainWindow):
         self.database = FaceDatabase(config['app']['database_path'])
         
         self.face_detector.load_known_faces(config['app']['known_faces_dir'])
+        
+        # Conectar señal de frames procesados
+        self.frame_processed.connect(self.on_frame_processed)
         
         # Configurar tema oscuro
         self.setup_theme()
@@ -213,12 +232,16 @@ class MainWindow(QMainWindow):
         # Iniciar cámaras
         self.camera_manager.start_all_cameras()
         
-        # Timer de actualización
+        # Timer de actualización (reducido a 50ms para mejor fluidez)
         self.update_timer = QTimer(self)
         self.update_timer.timeout.connect(self.update)
-        self.update_timer.start(30)
+        self.update_timer.start(50)
         
         self.last_processed: Dict[int, float] = {}
+        
+        # Estadísticas de rendimiento
+        self.frame_times: Dict[int, list] = {}
+        self.max_frame_time_samples = 30
         
     def apply_permissions(self):
         """Apply UI restrictions based on user role"""
@@ -230,7 +253,6 @@ class MainWindow(QMainWindow):
         
         # Viewer: solo puede ver cámaras, sin control
         if user.role == 'viewer':
-            # Deshabilitar controles de cámara
             if hasattr(self, 'start_btn'):
                 self.start_btn.setEnabled(False)
                 self.start_btn.setToolTip("Permission denied: Viewers cannot control cameras")
@@ -238,24 +260,14 @@ class MainWindow(QMainWindow):
                 self.stop_btn.setEnabled(False)
                 self.stop_btn.setToolTip("Permission denied: Viewers cannot control cameras")
             
-            # Deshabilitar controles de configuración
             if hasattr(self, 'threshold_slider'):
                 self.threshold_slider.setEnabled(False)
             if hasattr(self, 'interval_spin'):
                 self.interval_spin.setEnabled(False)
             
-            # Deshabilitar gestión de rostros
             if hasattr(self, 'sidebar') and len(self.sidebar.buttons) > 3:
                 self.sidebar.buttons[3].setEnabled(False)
                 self.sidebar.buttons[3].setToolTip("Permission denied: Viewers cannot manage faces")
-        
-        # Operator: puede controlar cámaras y gestionar rostros
-        elif user.role == 'operator':
-            pass  # Tiene acceso a casi todo
-        
-        # Admin: acceso completo
-        elif user.role == 'admin':
-            pass  # Sin restricciones
     
     def update_user_display(self):
         """Display current user info in status bar"""
@@ -433,7 +445,9 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(32, 32, 32, 32)
         layout.setSpacing(24)
         
-        # Título
+        # Título con estadísticas de rendimiento
+        header_layout = QHBoxLayout()
+        
         title = QLabel("Monitor de Cámaras")
         title.setStyleSheet("""
             font-size: 28px;
@@ -441,7 +455,22 @@ class MainWindow(QMainWindow):
             color: white;
             margin-bottom: 8px;
         """)
-        layout.addWidget(title)
+        header_layout.addWidget(title)
+        
+        header_layout.addStretch()
+        
+        # Label de FPS
+        self.fps_label = QLabel("FPS: --")
+        self.fps_label.setStyleSheet("""
+            font-size: 14px;
+            color: rgba(255, 255, 255, 0.8);
+            padding: 8px 16px;
+            background-color: rgba(0, 120, 212, 0.3);
+            border-radius: 6px;
+        """)
+        header_layout.addWidget(self.fps_label)
+        
+        layout.addLayout(header_layout)
         
         # Scroll para cámaras
         scroll = QScrollArea()
@@ -702,52 +731,91 @@ class MainWindow(QMainWindow):
         self.processing_interval = value / 1000
         
     def update(self):
-        try:
-            # Check if session is still valid
-            if not self.auth_manager.is_authenticated():
-                logger.warning("Session expired, closing application")
-                QMessageBox.warning(
-                    self,
-                    "Session Expired",
-                    "Your session has expired. Please login again."
-                )
-                self.close()
-                return
-            
-            frames = self.camera_manager.get_all_frames()
-            
-            for cam_id, frame in frames.items():
-                if frame is None:
-                    continue
-                    
-                current_time = time.time()
-                last_time = self.last_processed.get(cam_id, 0)
-                if current_time - last_time < self.processing_interval:
-                    self.display_frame(cam_id, frame)
-                    continue
-                    
-                processed_frame, alert_triggered = self.process_frame(cam_id, frame)
-                self.display_frame(cam_id, processed_frame)
-                self.last_processed[cam_id] = current_time
+            try:
+                # Check if session is still valid
+                if not self.auth_manager.is_authenticated():
+                    logger.warning("Session expired, closing application")
+                    QMessageBox.warning(
+                        self,
+                        "Session Expired",
+                        "Your session has expired. Please login again."
+                    )
+                    self.close()
+                    return
                 
-            self.update_status()
-            
-        except Exception as e:
-            logger.error(f"Error in update loop: {e}")
-            self.status_label.setText(f"❌ Error: {str(e)}")
-            
-    def process_frame(self, cam_id: int, frame: np.ndarray) -> Tuple[np.ndarray, bool]:
+                frames = self.camera_manager.get_all_frames()
+                
+                for cam_id, frame in frames.items():
+                    if frame is None:
+                        continue
+                    
+                    current_time = time.time()
+                    
+                    # Verificar si hay un procesamiento en curso
+                    if cam_id in self.processing_futures:
+                        future = self.processing_futures[cam_id]
+                        if future.done():
+                            # Procesamiento completado, obtener resultado
+                            try:
+                                del self.processing_futures[cam_id]
+                            except Exception as e:
+                                logger.error(f"Error removing future for camera {cam_id}: {e}")
+                        else:
+                            # Todavía procesando, mostrar frame sin procesar
+                            self.display_frame(cam_id, frame)
+                            continue
+                    
+                    # Verificar cache
+                    if cam_id in self.processed_frames_cache:
+                        cached_frame, cache_time = self.processed_frames_cache[cam_id]
+                        if current_time - cache_time < self.cache_timeout:
+                            self.display_frame(cam_id, cached_frame)
+                            continue
+                    
+                    # Verificar intervalo de procesamiento
+                    last_time = self.last_processed.get(cam_id, 0)
+                    if current_time - last_time < self.processing_interval:
+                        self.display_frame(cam_id, frame)
+                        continue
+                    
+                    # Enviar a procesamiento asíncrono
+                    self.last_processed[cam_id] = current_time
+                    future = self.executor.submit(
+                        self.process_frame_async,
+                        cam_id,
+                        frame.copy()  # Importante: copiar el frame
+                    )
+                    self.processing_futures[cam_id] = future
+                    
+                    # Mostrar frame original mientras se procesa
+                    self.display_frame(cam_id, frame)
+                
+                # Actualizar estadísticas
+                self.update_status()
+                self.update_fps_display()
+                
+            except Exception as e:
+                logger.error(f"Error in update loop: {e}")
+                self.status_label.setText(f"❌ Error: {str(e)}")
+    
+    def process_frame_async(self, cam_id: int, frame: np.ndarray) -> Tuple[int, np.ndarray, bool]:
+        """
+        Procesar frame de manera asíncrona en thread pool.
+        Retorna: (cam_id, processed_frame, alert_triggered)
+        """
+        start_time = time.time()
         alert_triggered = False
+        
         try:
             faces = self.face_detector.detect_faces(frame)
+            
             if not faces:
-                return frame, False
-                
+                return (cam_id, frame, False)
+            
             recognized_faces = self.face_detector.recognize_faces(faces)
+            camera_name = self.camera_manager.cameras[cam_id].name
             
             for face, known_face, confidence in recognized_faces:
-                camera_name = self.camera_manager.cameras[cam_id].name
-                
                 if known_face:
                     frame = draw_face_info(
                         frame, face.bbox,
@@ -759,6 +827,7 @@ class MainWindow(QMainWindow):
                         timestamp=time.time()
                     )
                     
+                    # Trigger alert (esto es thread-safe)
                     alert_event = self.alert_system.trigger_alert(
                         cam_id, camera_name,
                         known_face.name, face, confidence,
@@ -766,12 +835,10 @@ class MainWindow(QMainWindow):
                     )
                     alert_triggered = True
                     
-                    # Incluir user_id en el log
+                    # Log to database (usar QTimer para ejecutar en main thread)
                     user = self.auth_manager.get_current_user()
-                    self.database.log_face_event(
-                        alert_event,
-                        user_id=user.id if user else None
-                    )
+                    QTimer.singleShot(0, lambda e=alert_event, u=user: self.log_face_event_safe(e, u))
+                    
                 else:
                     frame = draw_face_info(
                         frame, face.bbox,
@@ -780,27 +847,122 @@ class MainWindow(QMainWindow):
                         camera_name=camera_name,
                         timestamp=time.time()
                     )
-                    
-        except Exception as e:
-            logger.error(f"Error processing frame: {e}")
             
-        return frame, alert_triggered
-        
-    def display_frame(self, cam_id: int, frame: np.ndarray):
+            # Registrar tiempo de procesamiento
+            processing_time = time.time() - start_time
+            self.record_frame_time(cam_id, processing_time)
+            
+            # Actualizar cache
+            self.processed_frames_cache[cam_id] = (frame, time.time())
+            
+            # Emitir señal para actualizar UI (thread-safe)
+            self.frame_processed.emit(cam_id, frame)
+            
+            return (cam_id, frame, alert_triggered)
+            
+        except Exception as e:
+            logger.error(f"Error processing frame for camera {cam_id}: {e}")
+            return (cam_id, frame, False)
+    
+    def log_face_event_safe(self, event, user):
+        """Log face event de manera thread-safe"""
         try:
-            if frame is None:
-                return
-                
-            pixmap = numpy_to_pixmap(frame)
-            self.camera_labels[cam_id].setPixmap(
-                pixmap.scaled(self.camera_labels[cam_id].size(), 
-                             Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            self.database.log_face_event(
+                event,
+                user_id=user.id if user else None
             )
+        except Exception as e:
+            logger.error(f"Error logging face event: {e}")
+    
+    def on_frame_processed(self, cam_id: int, frame: np.ndarray):
+        """Callback cuando un frame ha sido procesado (ejecutado en main thread)"""
+        try:
+            self.display_frame(cam_id, frame)
+        except Exception as e:
+            logger.error(f"Error displaying processed frame: {e}")
+    
+    def record_frame_time(self, cam_id: int, processing_time: float):
+        """Registrar tiempo de procesamiento para estadísticas"""
+        if cam_id not in self.frame_times:
+            self.frame_times[cam_id] = []
+        
+        self.frame_times[cam_id].append(processing_time)
+        
+        # Mantener solo las últimas N muestras
+        if len(self.frame_times[cam_id]) > self.max_frame_time_samples:
+            self.frame_times[cam_id].pop(0)
+    
+    def get_average_frame_time(self, cam_id: int) -> float:
+        """Obtener tiempo promedio de procesamiento"""
+        if cam_id not in self.frame_times or not self.frame_times[cam_id]:
+            return 0.0
+        return sum(self.frame_times[cam_id]) / len(self.frame_times[cam_id])
+    
+    def update_fps_display(self):
+        """Actualizar display de FPS"""
+        try:
+            total_fps = 0
+            active_cameras = 0
+            
+            for cam_id in self.camera_manager.cameras:
+                if cam_id in self.frame_times and self.frame_times[cam_id]:
+                    avg_time = self.get_average_frame_time(cam_id)
+                    if avg_time > 0:
+                        fps = 1.0 / avg_time
+                        total_fps += fps
+                        active_cameras += 1
+            
+            if active_cameras > 0:
+                avg_fps = total_fps / active_cameras
+                self.fps_label.setText(f"FPS: {avg_fps:.1f}")
+                
+                # Cambiar color basado en rendimiento
+                if avg_fps >= 20:
+                    color = "rgba(40, 167, 69, 0.3)"  # Verde
+                elif avg_fps >= 10:
+                    color = "rgba(255, 193, 7, 0.3)"  # Amarillo
+                else:
+                    color = "rgba(220, 53, 69, 0.3)"  # Rojo
+                
+                self.fps_label.setStyleSheet(f"""
+                    font-size: 14px;
+                    color: rgba(255, 255, 255, 0.9);
+                    padding: 8px 16px;
+                    background-color: {color};
+                    border-radius: 6px;
+                    font-weight: 600;
+                """)
+            else:
+                self.fps_label.setText("FPS: --")
+                
+        except Exception as e:
+            logger.error(f"Error updating FPS display: {e}")
+    
+    def display_frame(self, cam_id: int, frame: np.ndarray):
+        """Mostrar frame en la UI (optimizado)"""
+        try:
+            if frame is None or cam_id not in self.camera_labels:
+                return
+            
+            # Convertir a pixmap (operación costosa, hacerla eficiente)
+            pixmap = numpy_to_pixmap(frame)
+            
+            # Escalar solo si es necesario
+            label_size = self.camera_labels[cam_id].size()
+            if pixmap.width() > label_size.width() or pixmap.height() > label_size.height():
+                pixmap = pixmap.scaled(
+                    label_size,
+                    Qt.KeepAspectRatio,
+                    Qt.FastTransformation  # Usar transformación rápida
+                )
+            
+            self.camera_labels[cam_id].setPixmap(pixmap)
             
         except Exception as e:
-            logger.error(f"Error displaying frame: {e}")
-            
+            logger.error(f"Error displaying frame for camera {cam_id}: {e}")
+    
     def update_status(self):
+        """Actualizar display de estado"""
         try:
             status_text = []
             
@@ -813,10 +975,25 @@ class MainWindow(QMainWindow):
             for cam_id, cam_config in self.camera_manager.cameras.items():
                 running = cam_id in self.camera_manager.capture_threads
                 icon = "🟢" if running else "🔴"
-                status_text.append(f"{icon} Cámara {cam_id} ({cam_config.name}): {'Activa' if running else 'Detenida'}")
                 
+                # Agregar información de rendimiento
+                if running and cam_id in self.frame_times and self.frame_times[cam_id]:
+                    avg_time = self.get_average_frame_time(cam_id)
+                    fps = 1.0 / avg_time if avg_time > 0 else 0
+                    status_text.append(
+                        f"{icon} Cámara {cam_id} ({cam_config.name}): "
+                        f"Activa - {fps:.1f} FPS - {avg_time*1000:.0f}ms"
+                    )
+                else:
+                    status_text.append(f"{icon} Cámara {cam_id} ({cam_config.name}): {'Activa' if running else 'Detenida'}")
+            
             status_text.append("<br>👤 <b>Base de Datos</b>")
             status_text.append(f"Rostros conocidos: {len(self.face_detector.known_faces)}")
+            
+            # Estadísticas del thread pool
+            status_text.append("<br>⚡ <b>Rendimiento</b>")
+            active_tasks = len([f for f in self.processing_futures.values() if not f.done()])
+            status_text.append(f"Tareas activas: {active_tasks}/{self.executor._max_workers}")
             
             status_text.append("<br>🔔 <b>Alertas Recientes</b>")
             recent_alerts = self.alert_system.get_recent_alerts(3)
@@ -826,21 +1003,35 @@ class MainWindow(QMainWindow):
                     status_text.append(f"• {time_str}: {alert.face_name} en {alert.camera_name} ({alert.confidence:.2f})")
             else:
                 status_text.append("Sin alertas recientes")
-                
+            
             self.status_display.setText("<br>".join(status_text))
             
         except Exception as e:
             logger.error(f"Error updating status: {e}")
-            
+    
     def closeEvent(self, event):
+        """Cleanup al cerrar la aplicación"""
         try:
             user = self.auth_manager.get_current_user()
             if user:
                 logger.info(f"Application closing - User: {user.username}")
             
-            self.camera_manager.stop_all_cameras()
+            # Detener timer
             self.update_timer.stop()
+            
+            # Detener cámaras
+            self.camera_manager.stop_all_cameras()
+            
+            # Esperar a que terminen las tareas de procesamiento
+            logger.info("Waiting for processing tasks to complete...")
+            self.executor.shutdown(wait=True, timeout=5.0)
+            
+            # Limpiar cache
+            self.processed_frames_cache.clear()
+            self.processing_futures.clear()
+            
             event.accept()
+            
         except Exception as e:
             logger.error(f"Error during shutdown: {e}")
             event.accept()

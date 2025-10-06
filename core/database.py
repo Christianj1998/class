@@ -16,7 +16,7 @@ class FaceLogEntry:
     gender: Optional[str]
     confidence: float
     screenshot_path: Optional[str]
-    user_id: Optional[int] = None  # Usuario que estaba logueado
+    user_id: Optional[int] = None
 
     def __post_init__(self):
         if isinstance(self.timestamp, bytes):
@@ -53,7 +53,7 @@ class FaceDatabase:
                     )
                 ''')
                 
-                # Create face_logs table (updated)
+                # Create face_logs table with user_id
                 cursor.execute('''
                     CREATE TABLE IF NOT EXISTS face_logs (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -69,6 +69,23 @@ class FaceDatabase:
                         FOREIGN KEY (user_id) REFERENCES users(id)
                     )
                 ''')
+                
+                # MIGRATION: Check if user_id column exists, if not add it
+                cursor.execute("PRAGMA table_info(face_logs)")
+                columns = [col[1] for col in cursor.fetchall()]
+                
+                if 'user_id' not in columns:
+                    logger.warning("Migrating face_logs table: adding user_id column")
+                    try:
+                        cursor.execute('''
+                            ALTER TABLE face_logs 
+                            ADD COLUMN user_id INTEGER REFERENCES users(id)
+                        ''')
+                        conn.commit()
+                        logger.success("Successfully added user_id column to face_logs")
+                    except sqlite3.OperationalError as e:
+                        logger.error(f"Migration failed: {e}")
+                        # If migration fails, we'll continue but log the error
                 
                 # Create known_faces table
                 cursor.execute('''
@@ -95,21 +112,56 @@ class FaceDatabase:
                     )
                 ''')
                 
+                # Create indexes for better performance
+                cursor.execute('''
+                    CREATE INDEX IF NOT EXISTS idx_face_logs_timestamp 
+                    ON face_logs(timestamp)
+                ''')
+                cursor.execute('''
+                    CREATE INDEX IF NOT EXISTS idx_face_logs_camera_id 
+                    ON face_logs(camera_id)
+                ''')
+                cursor.execute('''
+                    CREATE INDEX IF NOT EXISTS idx_face_logs_face_name 
+                    ON face_logs(face_name)
+                ''')
+                cursor.execute('''
+                    CREATE INDEX IF NOT EXISTS idx_face_logs_user_id 
+                    ON face_logs(user_id)
+                ''')
+                
                 # Create default admin user if no users exist
                 cursor.execute('SELECT COUNT(*) FROM users')
                 if cursor.fetchone()[0] == 0:
                     import bcrypt
-                    default_password = "admin123"
+                    # Generate a random password instead of using default
+                    import secrets
+                    import string
+                    random_password = ''.join(secrets.choice(string.ascii_letters + string.digits) for _ in range(16))
+                    
                     salt = bcrypt.gensalt()
-                    hashed = bcrypt.hashpw(default_password.encode('utf-8'), salt)
+                    hashed = bcrypt.hashpw(random_password.encode('utf-8'), salt)
                     
                     cursor.execute('''
                         INSERT INTO users (username, email, password_hash, role, created_at)
                         VALUES (?, ?, ?, ?, ?)
                     ''', ('admin', 'admin@system.local', hashed.decode('utf-8'), 'admin', time.time()))
                     
-                    logger.warning("Default admin user created - username: 'admin', password: 'admin123'")
-                    logger.warning("CHANGE THIS PASSWORD IMMEDIATELY!")
+                    logger.warning("=" * 60)
+                    logger.warning("DEFAULT ADMIN USER CREATED")
+                    logger.warning(f"Username: admin")
+                    logger.warning(f"Password: {random_password}")
+                    logger.warning("SAVE THIS PASSWORD - IT WILL NOT BE SHOWN AGAIN!")
+                    logger.warning("=" * 60)
+                    
+                    # Save to a secure file
+                    credentials_file = self.db_path.parent / "ADMIN_CREDENTIALS.txt"
+                    with open(credentials_file, 'w') as f:
+                        f.write(f"Admin Credentials (Created: {time.strftime('%Y-%m-%d %H:%M:%S')})\n")
+                        f.write(f"Username: admin\n")
+                        f.write(f"Password: {random_password}\n")
+                        f.write("\nDELETE THIS FILE AFTER FIRST LOGIN AND PASSWORD CHANGE!\n")
+                    logger.info(f"Credentials saved to: {credentials_file}")
                 
                 conn.commit()
                 logger.success("Database initialized successfully")
@@ -301,7 +353,7 @@ class FaceDatabase:
             logger.error(f"Error getting audit logs: {e}")
             return []
 
-    # ============ FACE LOGS (Updated) ============
+    # ============ FACE LOGS ============
     
     def log_face_event(self, event, user_id: Optional[int] = None) -> int:
         """Log a face recognition event"""
@@ -397,7 +449,7 @@ class FaceDatabase:
             logger.error(f"Error retrieving face logs: {e}")
             return []
 
-    # ============ KNOWN FACES (Updated) ============
+    # ============ KNOWN FACES ============
     
     def add_known_face(self, name: str, embedding: bytes, image_path: str, 
                       created_by: Optional[int] = None) -> bool:
