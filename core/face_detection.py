@@ -24,6 +24,12 @@ class Face:
 @dataclass
 class KnownFace:
     name: str
+    lastname: str
+    age: int
+    cedula: str
+    birth_date: str
+    crime: str
+    case_number: str
     embedding: np.ndarray
     image_path: str
 
@@ -58,7 +64,7 @@ class FaceDetector:
             raise
 
     def load_known_faces(self, known_faces_dir: str) -> None:
-        """Load known faces from directory"""
+        """Load known faces from directory (backward compatibility)"""
         try:
             self.known_faces.clear()
             known_faces_dir = Path(known_faces_dir)
@@ -82,11 +88,22 @@ class FaceDetector:
                         logger.warning(f"No faces found in {face_file}")
                         continue
                         
-                    # Use the first face found in the image
                     face = faces[0]
                     name = face_file.stem
+                    
+                    # Parse filename to extract information
+                    # Format: cedula_timestamp.jpg
+                    parts = name.rsplit('_', 1)
+                    cedula = parts[0] if len(parts) > 1 else name
+                    
                     self.known_faces.append(KnownFace(
                         name=name,
+                        lastname="",
+                        age=0,
+                        cedula=cedula,
+                        birth_date="",
+                        crime="",
+                        case_number="",
                         embedding=face.embedding,
                         image_path=str(face_file)
                     ))
@@ -100,6 +117,36 @@ class FaceDetector:
         except Exception as e:
             logger.error(f"Error loading known faces: {e}")
             raise
+
+    def load_known_faces_from_db(self, database) -> None:
+        """Load known faces from database"""
+        try:
+            self.known_faces.clear()
+            db_faces = database.get_known_faces()
+            
+            for face_data in db_faces:
+                try:
+                    embedding = np.frombuffer(face_data['embedding'], dtype=np.float32)
+                    
+                    self.known_faces.append(KnownFace(
+                        name=face_data['name'],
+                        lastname=face_data['lastname'],
+                        age=face_data['age'],
+                        cedula=face_data['cedula'],
+                        birth_date=face_data['birth_date'],
+                        crime=face_data['crime'],
+                        case_number=face_data['case_number'],
+                        embedding=embedding,
+                        image_path=face_data['image_path']
+                    ))
+                except Exception as e:
+                    logger.error(f"Error processing face data: {e}")
+                    continue
+            
+            logger.info(f"Loaded {len(self.known_faces)} known faces from database")
+            
+        except Exception as e:
+            logger.error(f"Error loading known faces from database: {e}")
 
     def detect_faces(self, image: np.ndarray) -> List[Face]:
         """Detect faces in an image"""
@@ -132,7 +179,6 @@ class FaceDetector:
             return [(face, None, 0.0) for face in faces]
             
         try:
-            # Get all known face embeddings
             known_embeddings = np.array([kf.embedding for kf in self.known_faces])
             
             for face in faces:
@@ -140,7 +186,6 @@ class FaceDetector:
                     results.append((face, None, 0.0))
                     continue
                     
-                # Calculate cosine similarity between current face and all known faces
                 similarities = np.dot(known_embeddings, face.embedding) / (
                     np.linalg.norm(known_embeddings, axis=1) * np.linalg.norm(face.embedding)
                 )
@@ -172,7 +217,10 @@ class FaceDetector:
             
         return image[y1:y2, x1:x2].copy()
 
-    def add_known_face(self, image: np.ndarray, name: str, save_dir: str) -> bool:
+    def add_known_face(self, image: np.ndarray, name: str, lastname: str,
+                      age: int, cedula: str, birth_date: str,
+                      crime: str, case_number: str,
+                      save_dir: str, database=None, created_by=None) -> bool:
         """Add a new known face to the database"""
         try:
             save_dir = Path(save_dir)
@@ -183,28 +231,41 @@ class FaceDetector:
                 logger.warning("No faces found in the provided image")
                 return False
                 
-            # Use the first face found
             face = faces[0]
-            
-            # Save the face image
             timestamp = int(time.time())
-            face_path = save_dir / f"{name}_{timestamp}.jpg"
+            face_path = save_dir / f"{cedula}_{timestamp}.jpg"
             cv2.imwrite(str(face_path), image)
             
-            # Add to known faces
+            # Save to database if provided
+            if database:
+                embedding_bytes = face.embedding.tobytes()
+                success = database.add_known_face(
+                    name, lastname, age, cedula, birth_date,
+                    crime, case_number, embedding_bytes,
+                    str(face_path), created_by
+                )
+                if not success:
+                    return False
+            
+            # Add to memory
             self.known_faces.append(KnownFace(
                 name=name,
+                lastname=lastname,
+                age=age,
+                cedula=cedula,
+                birth_date=birth_date,
+                crime=crime,
+                case_number=case_number,
                 embedding=face.embedding,
                 image_path=str(face_path)
             ))
             
-            logger.info(f"Added new known face: {name}")
+            logger.info(f"Added new known face: {name} {lastname} - Cedula: {cedula}")
             return True
             
         except Exception as e:
             logger.error(f"Error adding known face: {e}")
             return False
-    
 
     def _get_age(self, face) -> Optional[int]:
         """Extract age estimation if available"""
@@ -212,7 +273,6 @@ class FaceDetector:
             return None
         return int(face.age) if hasattr(face, 'age') else None
     
-
     def _get_gender(self, face) -> Optional[str]:
         """Extract gender prediction if available"""
         if not self.analysis_enabled:
@@ -220,3 +280,4 @@ class FaceDetector:
         if not hasattr(face, 'sex') or face.sex is None:
             return None
         return 'Female' if np.argmax(face.sex) == 1 else 'Male'
+    

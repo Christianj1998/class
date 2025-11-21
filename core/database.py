@@ -30,7 +30,7 @@ class FaceDatabase:
         self._init_db()
 
     def _init_db(self) -> None:
-        """Initialize the database with required tables"""
+        """Initialize the database with required tables and handle migrations"""
         try:
             self.db_path.parent.mkdir(parents=True, exist_ok=True)
             
@@ -70,28 +70,17 @@ class FaceDatabase:
                     )
                 ''')
                 
-                # MIGRATION: Check if user_id column exists, if not add it
-                cursor.execute("PRAGMA table_info(face_logs)")
-                columns = [col[1] for col in cursor.fetchall()]
-                
-                if 'user_id' not in columns:
-                    logger.warning("Migrating face_logs table: adding user_id column")
-                    try:
-                        cursor.execute('''
-                            ALTER TABLE face_logs 
-                            ADD COLUMN user_id INTEGER REFERENCES users(id)
-                        ''')
-                        conn.commit()
-                        logger.success("Successfully added user_id column to face_logs")
-                    except sqlite3.OperationalError as e:
-                        logger.error(f"Migration failed: {e}")
-                        # If migration fails, we'll continue but log the error
-                
-                # Create known_faces table
+                # Create known_faces table with new columns
                 cursor.execute('''
                     CREATE TABLE IF NOT EXISTS known_faces (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        name TEXT NOT NULL UNIQUE,
+                        name TEXT NOT NULL,
+                        lastname TEXT,
+                        age INTEGER,
+                        cedula TEXT UNIQUE,
+                        birth_date TEXT,
+                        crime TEXT,
+                        case_number TEXT,
                         embedding BLOB NOT NULL,
                         image_path TEXT NOT NULL,
                         created_at REAL NOT NULL,
@@ -112,6 +101,43 @@ class FaceDatabase:
                     )
                 ''')
                 
+                # ====== MIGRATION SECTION ======
+                # Check and add missing columns to known_faces
+                cursor.execute("PRAGMA table_info(known_faces)")
+                columns = [row[1] for row in cursor.fetchall()]
+                
+                required_columns = {
+                    'lastname': 'TEXT',
+                    'age': 'INTEGER',
+                    'cedula': 'TEXT',
+                    'birth_date': 'TEXT',
+                    'crime': 'TEXT',
+                    'case_number': 'TEXT'
+                }
+                
+                for col_name, col_type in required_columns.items():
+                    if col_name not in columns:
+                        logger.warning(f"Migrating known_faces table: adding {col_name} column")
+                        try:
+                            cursor.execute(f'ALTER TABLE known_faces ADD COLUMN {col_name} {col_type}')
+                            logger.info(f"✅ Column {col_name} added successfully")
+                        except sqlite3.OperationalError as e:
+                            logger.error(f"Migration failed for {col_name}: {e}")
+                
+                # Ensure cedula has values (migrate existing records)
+                cursor.execute("SELECT COUNT(*) FROM known_faces WHERE cedula IS NULL OR cedula = ''")
+                result = cursor.fetchone()
+                null_count = result[0] if result else 0
+                
+                if null_count > 0:
+                    logger.warning(f"Populating {null_count} records with default cedula values")
+                    cursor.execute('''
+                        UPDATE known_faces 
+                        SET cedula = 'UNKNOWN_' || id
+                        WHERE cedula IS NULL OR cedula = ''
+                    ''')
+                    logger.info(f"✅ Updated {null_count} records")
+                
                 # Create indexes for better performance
                 cursor.execute('''
                     CREATE INDEX IF NOT EXISTS idx_face_logs_timestamp 
@@ -129,14 +155,37 @@ class FaceDatabase:
                     CREATE INDEX IF NOT EXISTS idx_face_logs_user_id 
                     ON face_logs(user_id)
                 ''')
+                cursor.execute('''
+                    CREATE INDEX IF NOT EXISTS idx_known_faces_cedula 
+                    ON known_faces(cedula)
+                ''')
+                cursor.execute('''
+                    CREATE INDEX IF NOT EXISTS idx_known_faces_case_number 
+                    ON known_faces(case_number)
+                ''')
+                
+                # Check if user_id column exists in face_logs (MIGRATION)
+                cursor.execute("PRAGMA table_info(face_logs)")
+                face_logs_columns = [row[1] for row in cursor.fetchall()]
+                
+                if 'user_id' not in face_logs_columns:
+                    logger.warning("Migrating face_logs table: adding user_id column")
+                    try:
+                        cursor.execute('''
+                            ALTER TABLE face_logs 
+                            ADD COLUMN user_id INTEGER REFERENCES users(id)
+                        ''')
+                        logger.info("✅ Column user_id added to face_logs")
+                    except sqlite3.OperationalError as e:
+                        logger.error(f"Migration failed: {e}")
                 
                 # Create default admin user if no users exist
                 cursor.execute('SELECT COUNT(*) FROM users')
                 if cursor.fetchone()[0] == 0:
                     import bcrypt
-                    # Generate a random password instead of using default
                     import secrets
                     import string
+                    
                     random_password = ''.join(secrets.choice(string.ascii_letters + string.digits) for _ in range(16))
                     
                     salt = bcrypt.gensalt()
@@ -154,7 +203,6 @@ class FaceDatabase:
                     logger.warning("SAVE THIS PASSWORD - IT WILL NOT BE SHOWN AGAIN!")
                     logger.warning("=" * 60)
                     
-                    # Save to a secure file
                     credentials_file = self.db_path.parent / "ADMIN_CREDENTIALS.txt"
                     with open(credentials_file, 'w') as f:
                         f.write(f"Admin Credentials (Created: {time.strftime('%Y-%m-%d %H:%M:%S')})\n")
@@ -451,24 +499,30 @@ class FaceDatabase:
 
     # ============ KNOWN FACES ============
     
-    def add_known_face(self, name: str, embedding: bytes, image_path: str, 
+    def add_known_face(self, name: str, lastname: str, age: int, cedula: str,
+                      birth_date: str, crime: str, case_number: str,
+                      embedding: bytes, image_path: str, 
                       created_by: Optional[int] = None) -> bool:
         """Add a known face to the database"""
         try:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
                 cursor.execute('''
-                    INSERT INTO known_faces (name, embedding, image_path, created_at, created_by)
-                    VALUES (?, ?, ?, ?, ?)
-                ''', (name, embedding, image_path, time.time(), created_by))
+                    INSERT INTO known_faces (name, lastname, age, cedula, birth_date, 
+                                            crime, case_number, embedding, image_path, 
+                                            created_at, created_by)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (name, lastname, age, cedula, birth_date, crime, case_number,
+                      embedding, image_path, time.time(), created_by))
                 conn.commit()
                 
                 if created_by:
-                    self.log_audit(created_by, 'add_face', f"Added face: {name}")
+                    self.log_audit(created_by, 'add_face', 
+                                 f"Added face: {name} {lastname} - Cedula: {cedula}")
                 
                 return True
         except sqlite3.IntegrityError:
-            logger.warning(f"Face with name '{name}' already exists")
+            logger.warning(f"Face with cedula '{cedula}' already exists")
             return False
         except Exception as e:
             logger.error(f"Error adding known face: {e}")
@@ -478,31 +532,30 @@ class FaceDatabase:
         """Retrieve all known faces from the database"""
         try:
             with sqlite3.connect(self.db_path) as conn:
+                conn.row_factory = sqlite3.Row
                 cursor = conn.cursor()
                 cursor.execute('''
-                    SELECT name, embedding, image_path FROM known_faces
+                    SELECT id, name, lastname, age, cedula, birth_date, crime, 
+                           case_number, embedding, image_path 
+                    FROM known_faces
                 ''')
-                return [{
-                    'name': row[0],
-                    'embedding': row[1],
-                    'image_path': row[2]
-                } for row in cursor.fetchall()]
+                return [dict(row) for row in cursor.fetchall()]
         except Exception as e:
             logger.error(f"Error retrieving known faces: {e}")
             return []
 
-    def delete_known_face(self, name: str, deleted_by: Optional[int] = None) -> bool:
+    def delete_known_face(self, cedula: str, deleted_by: Optional[int] = None) -> bool:
         """Delete a known face from the database"""
         try:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
                 cursor.execute('''
-                    DELETE FROM known_faces WHERE name = ?
-                ''', (name,))
+                    DELETE FROM known_faces WHERE cedula = ?
+                ''', (cedula,))
                 conn.commit()
                 
                 if deleted_by and cursor.rowcount > 0:
-                    self.log_audit(deleted_by, 'delete_face', f"Deleted face: {name}")
+                    self.log_audit(deleted_by, 'delete_face', f"Deleted face: {cedula}")
                 
                 return cursor.rowcount > 0
         except Exception as e:

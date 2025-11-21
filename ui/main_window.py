@@ -212,7 +212,7 @@ class MainWindow(QMainWindow):
         self.alert_system = AlertSystem(config)
         self.database = FaceDatabase(config['app']['database_path'])
         
-        self.face_detector.load_known_faces(config['app']['known_faces_dir'])
+        self.face_detector.load_known_faces_from_db(database)
         
         # Conectar señal de frames procesados
         self.frame_processed.connect(self.on_frame_processed)
@@ -690,8 +690,9 @@ class MainWindow(QMainWindow):
             )
             return
         
-        dialog = FaceManagerDialog(self.face_detector, self.config['app']['known_faces_dir'])
+        dialog = FaceManagerDialog(self.face_detector, self.config['app']['known_faces_dir'], self.database,  self.auth_manager)
         dialog.exec_()
+        self.face_detector.load_known_faces_from_db(self.database)
         self.face_detector.load_known_faces(self.config['app']['known_faces_dir'])
     
     def open_user_manager(self):

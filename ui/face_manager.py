@@ -1,8 +1,9 @@
 import os
 from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QListWidget, QPushButton,
                             QLabel, QFileDialog, QMessageBox, QLineEdit, QComboBox, 
-                            QFrame, QSplitter, QListWidgetItem, QGraphicsDropShadowEffect)
-from PyQt5.QtCore import Qt, QSize
+                            QFrame, QSplitter, QListWidgetItem, QGraphicsDropShadowEffect,
+                            QSpinBox, QDateEdit, QScrollArea)
+from PyQt5.QtCore import Qt, QSize, QDate
 from PyQt5.QtGui import QPixmap, QFont, QColor, QIcon
 from loguru import logger
 import cv2
@@ -12,15 +13,18 @@ from pathlib import Path
 from core.utils import numpy_to_pixmap, resize_image
 
 class FaceManagerDialog(QDialog):
-    def __init__(self, face_detector, known_faces_dir):
+    def __init__(self, face_detector, known_faces_dir, database, auth_manager):
         super().__init__()
         self.face_detector = face_detector
         self.known_faces_dir = known_faces_dir
+        self.database = database
+        self.auth_manager = auth_manager
         self.current_image = None
+        self.selected_face_data = None
         
         self.setWindowTitle("Administrador de Rostros")
-        self.setGeometry(150, 100, 1100, 700)
-        self.setMinimumSize(900, 600)
+        self.setGeometry(150, 100, 1100, 800)
+        self.setMinimumSize(900, 700)
         
         self.setup_style()
         self.init_ui()
@@ -70,6 +74,18 @@ class FaceManagerDialog(QDialog):
                 font-size: 13px;
             }
             QLineEdit:focus {
+                background-color: rgba(255, 255, 255, 0.12);
+                border: 1px solid rgba(0, 120, 212, 0.8);
+            }
+            QSpinBox, QDateEdit {
+                background-color: rgba(255, 255, 255, 0.08);
+                color: white;
+                border: 1px solid rgba(255, 255, 255, 0.15);
+                border-radius: 6px;
+                padding: 8px;
+                font-size: 13px;
+            }
+            QSpinBox:focus, QDateEdit:focus {
                 background-color: rgba(255, 255, 255, 0.12);
                 border: 1px solid rgba(0, 120, 212, 0.8);
             }
@@ -183,7 +199,7 @@ class FaceManagerDialog(QDialog):
         
         self.face_preview = QLabel()
         self.face_preview.setAlignment(Qt.AlignCenter)
-        self.face_preview.setMinimumSize(400, 400)
+        self.face_preview.setMinimumSize(400, 300)
         self.face_preview.setStyleSheet("""
             QLabel {
                 background-color: rgba(0, 0, 0, 0.2);
@@ -192,7 +208,6 @@ class FaceManagerDialog(QDialog):
             }
         """)
         
-        # Placeholder cuando no hay imagen
         placeholder_text = "Selecciona un rostro o importa una imagen"
         self.face_preview.setText(placeholder_text)
         self.face_preview.setStyleSheet("""
@@ -205,18 +220,24 @@ class FaceManagerDialog(QDialog):
         preview_frame_layout.addWidget(self.face_preview)
         right_layout.addWidget(preview_frame)
         
-        # Información del rostro
-        info_frame = QFrame()
-        info_frame.setStyleSheet("""
+        # Información del rostro - Scroll area para formulario largo
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setStyleSheet("QScrollArea { background-color: transparent; border: none; }")
+        
+        info_widget = QFrame()
+        info_widget.setStyleSheet("""
             QFrame {
                 background-color: rgba(255, 255, 255, 0.05);
                 border-radius: 8px;
                 padding: 12px;
             }
         """)
-        info_layout = QVBoxLayout(info_frame)
+        info_layout = QVBoxLayout(info_widget)
+        info_layout.setSpacing(8)
         
-        name_label = QLabel("Nombre del Rostro:")
+        # Nombre
+        name_label = QLabel("Nombre:")
         name_label.setStyleSheet("font-weight: 600; color: white;")
         info_layout.addWidget(name_label)
         
@@ -224,7 +245,63 @@ class FaceManagerDialog(QDialog):
         self.name_input.setPlaceholderText("Ingresa el nombre de la persona...")
         info_layout.addWidget(self.name_input)
         
-        right_layout.addWidget(info_frame)
+        # Apellido
+        surname_label = QLabel("Apellido:")
+        surname_label.setStyleSheet("font-weight: 600; color: white;")
+        info_layout.addWidget(surname_label)
+        
+        self.surname_input = QLineEdit()
+        self.surname_input.setPlaceholderText("Ingresa el apellido...")
+        info_layout.addWidget(self.surname_input)
+        
+        # Edad
+        age_label = QLabel("Edad:")
+        age_label.setStyleSheet("font-weight: 600; color: white;")
+        info_layout.addWidget(age_label)
+        
+        self.age_input = QSpinBox()
+        self.age_input.setRange(0, 120)
+        info_layout.addWidget(self.age_input)
+        
+        # Cédula
+        cedula_label = QLabel("Cédula:")
+        cedula_label.setStyleSheet("font-weight: 600; color: white;")
+        info_layout.addWidget(cedula_label)
+        
+        self.cedula_input = QLineEdit()
+        self.cedula_input.setPlaceholderText("Número de cédula...")
+        info_layout.addWidget(self.cedula_input)
+        
+        # Fecha de Nacimiento
+        birth_label = QLabel("Fecha de Nacimiento:")
+        birth_label.setStyleSheet("font-weight: 600; color: white;")
+        info_layout.addWidget(birth_label)
+        
+        self.birth_input = QDateEdit()
+        self.birth_input.setCalendarPopup(True)
+        self.birth_input.setDate(QDate.currentDate())
+        info_layout.addWidget(self.birth_input)
+        
+        # Delito
+        crime_label = QLabel("Delito:")
+        crime_label.setStyleSheet("font-weight: 600; color: white;")
+        info_layout.addWidget(crime_label)
+        
+        self.crime_input = QLineEdit()
+        self.crime_input.setPlaceholderText("Descripción del delito...")
+        info_layout.addWidget(self.crime_input)
+        
+        # Número de Expediente
+        case_label = QLabel("Número de Expediente:")
+        case_label.setStyleSheet("font-weight: 600; color: white;")
+        info_layout.addWidget(case_label)
+        
+        self.case_input = QLineEdit()
+        self.case_input.setPlaceholderText("Número de expediente...")
+        info_layout.addWidget(self.case_input)
+        
+        scroll_area.setWidget(info_widget)
+        right_layout.addWidget(scroll_area)
         
         # Botones de acción
         button_layout = QHBoxLayout()
@@ -277,57 +354,67 @@ class FaceManagerDialog(QDialog):
         self.setLayout(layout)
         
     def load_face_list(self):
-        """Cargar lista de rostros"""
+        """Cargar lista de rostros desde la base de datos"""
         self.face_list.clear()
-        known_faces_dir = Path(self.known_faces_dir)
         
-        if not known_faces_dir.exists():
-            logger.warning(f"Known faces directory {known_faces_dir} does not exist")
-            self.face_count_label.setText("0 rostros registrados")
-            return
-        
-        faces = []
-        for face_file in known_faces_dir.glob('*.*'):
-            if face_file.suffix.lower() in ['.jpg', '.jpeg', '.png']:
-                faces.append(face_file.stem)
-        
-        # Ordenar alfabéticamente
-        faces.sort()
-        
-        for face_name in faces:
-            item = QListWidgetItem(face_name)
-            self.face_list.addItem(item)
-        
-        # Actualizar contador
-        count = len(faces)
-        self.face_count_label.setText(f"{count} rostro{'s' if count != 1 else ''} registrado{'s' if count != 1 else ''}")
+        try:
+            known_faces = self.database.get_known_faces()
+            
+            for face_data in known_faces:
+                display_text = f"👤 {face_data['name']} {face_data['lastname']} - Cédula: {face_data['cedula']}"
+                item = QListWidgetItem(display_text)
+                item.setData(Qt.UserRole, face_data)
+                self.face_list.addItem(item)
+            
+            count = len(known_faces)
+            self.face_count_label.setText(f"{count} rostro{'s' if count != 1 else ''} registrado{'s' if count != 1 else ''}")
+            
+            logger.info(f"Loaded {count} faces from database")
+            
+        except Exception as e:
+            logger.error(f"Error loading faces from database: {e}")
+            self.show_message("Error", f"Error al cargar rostros: {str(e)}", QMessageBox.Critical)
         
     def on_face_selected(self, current, previous):
         """Manejar selección de rostro"""
         if current is None:
             self.face_preview.clear()
             self.face_preview.setText("Selecciona un rostro o importa una imagen")
-            self.name_input.clear()
-            return
-        
-        face_name = current.text()
-        self.name_input.setText(face_name)
-        
-        # Cargar y mostrar imagen
-        face_path = Path(self.known_faces_dir) / f"{face_name}{self.get_face_extension(face_name)}"
-        if not face_path.exists():
-            self.show_message("Error", f"Archivo de imagen no encontrado: {face_path}", QMessageBox.Warning)
+            self.clear_all_fields()
+            self.selected_face_data = None
             return
         
         try:
+            face_data = current.data(Qt.UserRole)
+            self.selected_face_data = face_data
+            
+            # Llenar campos
+            self.name_input.setText(face_data['name'])
+            self.surname_input.setText(face_data['lastname'])
+            self.age_input.setValue(face_data['age'])
+            self.cedula_input.setText(face_data['cedula'])
+            
+            birth_date = QDate.fromString(face_data['birth_date'], "yyyy-MM-dd")
+            if birth_date.isValid():
+                self.birth_input.setDate(birth_date)
+            
+            self.crime_input.setText(face_data['crime'])
+            self.case_input.setText(face_data['case_number'])
+            
+            # Cargar y mostrar imagen
+            face_path = Path(face_data['image_path'])
+            if not face_path.exists():
+                self.face_preview.setText("📷 Archivo de imagen no encontrado")
+                return
+            
             image = cv2.imread(str(face_path))
             if image is None:
-                raise ValueError("No se pudo leer la imagen")
+                self.face_preview.setText("❌ Error al cargar la imagen")
+                return
             
             self.current_image = image
             pixmap = numpy_to_pixmap(image)
             
-            # Escalar manteniendo aspecto
             scaled_pixmap = pixmap.scaled(
                 self.face_preview.width() - 40,
                 self.face_preview.height() - 40,
@@ -344,128 +431,147 @@ class FaceManagerDialog(QDialog):
             """)
             
         except Exception as e:
-            self.show_message("Error", f"Error al cargar imagen: {str(e)}", QMessageBox.Critical)
-            logger.error(f"Error loading face image: {e}")
-    
-    def get_face_extension(self, face_name: str) -> str:
-        """Obtener extensión del archivo"""
-        known_faces_dir = Path(self.known_faces_dir)
-        for ext in ['.jpg', '.jpeg', '.png']:
-            if (known_faces_dir / f"{face_name}{ext}").exists():
-                return ext
-        return ''
+            logger.error(f"Error loading face data: {e}")
+            self.show_message("Error", f"Error al cargar datos del rostro: {str(e)}", QMessageBox.Critical)
     
     def add_face(self):
         """Agregar nuevo rostro"""
         name = self.name_input.text().strip()
+        surname = self.surname_input.text().strip()
+        age = self.age_input.value()
+        cedula = self.cedula_input.text().strip()
+        birth_date = self.birth_input.date().toString("yyyy-MM-dd")
+        crime = self.crime_input.text().strip()
+        case_number = self.case_input.text().strip()
+        
+        # Validaciones
         if not name:
-            self.show_message("Error", "Por favor ingresa un nombre para el rostro", QMessageBox.Warning)
+            self.show_message("Error", "Por favor ingresa un nombre", QMessageBox.Warning)
+            return
+        
+        if not surname:
+            self.show_message("Error", "Por favor ingresa un apellido", QMessageBox.Warning)
+            return
+        
+        if not cedula:
+            self.show_message("Error", "La cédula es obligatoria", QMessageBox.Warning)
             return
         
         if self.current_image is None:
             self.show_message("Error", "Por favor importa o selecciona una imagen primero", QMessageBox.Warning)
             return
         
-        # Verificar si ya existe
-        existing_files = list(Path(self.known_faces_dir).glob(f"{name}.*"))
-        if existing_files:
-            self.show_message("Error", f"Ya existe un rostro con el nombre '{name}'", QMessageBox.Warning)
-            return
+        # Verificar si la cédula ya existe
+        existing_faces = self.database.get_known_faces()
+        for face in existing_faces:
+            if face['cedula'] == cedula:
+                self.show_message("Error", f"Ya existe un rostro con la cédula '{cedula}'", QMessageBox.Warning)
+                return
         
         # Agregar el rostro
+        user = self.auth_manager.get_current_user()
         success = self.face_detector.add_known_face(
-            self.current_image, name, self.known_faces_dir)
+            self.current_image, name, surname, age, cedula,
+            birth_date, crime, case_number,
+            self.known_faces_dir, self.database,
+            created_by=user.id if user else None
+        )
         
         if success:
-            self.show_message("Éxito", f"Rostro '{name}' agregado correctamente", QMessageBox.Information)
+            self.show_message("Éxito", 
+                             f"Rostro de {name} {surname} agregado correctamente", 
+                             QMessageBox.Information)
+            self.clear_all_fields()
             self.load_face_list()
-            self.name_input.clear()
-            self.face_preview.clear()
-            self.face_preview.setText("Selecciona un rostro o importa una imagen")
-            self.current_image = None
         else:
             self.show_message("Error", "No se pudo agregar el rostro", QMessageBox.Critical)
     
     def update_face(self):
         """Actualizar rostro existente"""
-        current_item = self.face_list.currentItem()
-        if current_item is None:
+        if not self.selected_face_data:
             self.show_message("Error", "Por favor selecciona un rostro para actualizar", QMessageBox.Warning)
             return
         
-        old_name = current_item.text()
-        new_name = self.name_input.text().strip()
+        name = self.name_input.text().strip()
+        surname = self.surname_input.text().strip()
+        age = self.age_input.value()
+        cedula = self.cedula_input.text().strip()
+        birth_date = self.birth_input.date().toString("yyyy-MM-dd")
+        crime = self.crime_input.text().strip()
+        case_number = self.case_input.text().strip()
         
-        if not new_name:
-            self.show_message("Error", "Por favor ingresa un nombre para el rostro", QMessageBox.Warning)
+        if not name or not surname:
+            self.show_message("Error", "Nombre y apellido son obligatorios", QMessageBox.Warning)
             return
         
-        if self.current_image is None:
-            self.show_message("Error", "Por favor importa o selecciona una imagen primero", QMessageBox.Warning)
-            return
-        
-        # Renombrar si cambió el nombre
-        if old_name != new_name:
-            old_path = Path(self.known_faces_dir) / f"{old_name}{self.get_face_extension(old_name)}"
-            new_path = Path(self.known_faces_dir) / f"{new_name}{old_path.suffix}"
-            
-            if new_path.exists():
-                self.show_message("Error", f"Ya existe un rostro con el nombre '{new_name}'", QMessageBox.Warning)
-                return
-            
-            try:
-                old_path.rename(new_path)
-            except Exception as e:
-                self.show_message("Error", f"Error al renombrar: {str(e)}", QMessageBox.Critical)
-                return
-        
-        # Actualizar imagen
         try:
-            current_path = Path(self.known_faces_dir) / f"{new_name}{self.get_face_extension(new_name)}"
-            cv2.imwrite(str(current_path), self.current_image)
+            import sqlite3
             
-            # Recargar rostros en el detector
-            self.face_detector.load_known_faces(self.known_faces_dir)
+            # CORRECCIÓN: Usar el path correcto de la base de datos
+            conn = sqlite3.connect(str(self.database.db_path))
+            cursor = conn.cursor()
             
-            self.show_message("Éxito", "Rostro actualizado correctamente", QMessageBox.Information)
-            self.load_face_list()
+            # Actualizar el registro
+            cursor.execute('''
+                UPDATE known_faces 
+                SET name=?, lastname=?, age=?, birth_date=?, crime=?, case_number=?
+                WHERE cedula=?
+            ''', (name, surname, age, birth_date, crime, case_number, cedula))
+            
+            affected_rows = cursor.rowcount
+            conn.commit()
+            conn.close()
+            
+            if affected_rows > 0:
+                # Recargar rostros en el detector
+                self.face_detector.load_known_faces_from_db(self.database)
+                
+                self.show_message("Éxito", "Rostro actualizado correctamente", QMessageBox.Information)
+                self.load_face_list()
+            else:
+                self.show_message("Error", "No se encontró el rostro para actualizar", QMessageBox.Warning)
+            
         except Exception as e:
+            logger.error(f"Error updating face: {e}")
             self.show_message("Error", f"Error al actualizar: {str(e)}", QMessageBox.Critical)
-    
+           
+
     def delete_face(self):
         """Eliminar rostro"""
-        current_item = self.face_list.currentItem()
-        if current_item is None:
+        if not self.selected_face_data:
             self.show_message("Error", "Por favor selecciona un rostro para eliminar", QMessageBox.Warning)
             return
         
-        name = current_item.text()
+        cedula = self.selected_face_data['cedula']
+        name = f"{self.selected_face_data['name']} {self.selected_face_data['lastname']}"
         
         reply = self.show_question(
             "Confirmar Eliminación",
-            f"¿Estás seguro de que deseas eliminar el rostro '{name}'?",
+            f"¿Estás seguro de que deseas eliminar el rostro de {name}?",
             "Esta acción no se puede deshacer."
         )
         
         if reply == QMessageBox.No:
             return
         
-        # Eliminar archivo
-        face_path = Path(self.known_faces_dir) / f"{name}{self.get_face_extension(name)}"
         try:
-            face_path.unlink()
+            user = self.auth_manager.get_current_user()
+            success = self.database.delete_known_face(
+                cedula,
+                deleted_by=user.id if user else None
+            )
             
-            # Recargar
-            self.face_detector.load_known_faces(self.known_faces_dir)
-            self.load_face_list()
-            
-            self.face_preview.clear()
-            self.face_preview.setText("Selecciona un rostro o importa una imagen")
-            self.name_input.clear()
-            self.current_image = None
-            
-            self.show_message("Éxito", "Rostro eliminado correctamente", QMessageBox.Information)
+            if success:
+                self.face_detector.load_known_faces_from_db(self.database)
+                self.load_face_list()
+                self.clear_all_fields()
+                
+                self.show_message("Éxito", "Rostro eliminado correctamente", QMessageBox.Information)
+            else:
+                self.show_message("Error", "No se pudo eliminar el rostro", QMessageBox.Critical)
+                
         except Exception as e:
+            logger.error(f"Error deleting face: {e}")
             self.show_message("Error", f"Error al eliminar: {str(e)}", QMessageBox.Critical)
     
     def import_image(self):
@@ -500,14 +606,23 @@ class FaceManagerDialog(QDialog):
                 }
             """)
             
-            # Sugerir nombre basado en el archivo
-            suggested_name = Path(file_path).stem
-            if not self.name_input.text():
-                self.name_input.setText(suggested_name)
-            
         except Exception as e:
             self.show_message("Error", f"Error al cargar imagen: {str(e)}", QMessageBox.Critical)
             logger.error(f"Error importing image: {e}")
+    
+    def clear_all_fields(self):
+        """Limpiar todos los campos del formulario"""
+        self.name_input.clear()
+        self.surname_input.clear()
+        self.age_input.setValue(0)
+        self.cedula_input.clear()
+        self.birth_input.setDate(QDate.currentDate())
+        self.crime_input.clear()
+        self.case_input.clear()
+        self.face_preview.clear()
+        self.face_preview.setText("Selecciona un rostro o importa una imagen")
+        self.current_image = None
+        self.selected_face_data = None
     
     def show_message(self, title, text, icon):
         """Mostrar mensaje con estilo"""

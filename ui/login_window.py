@@ -1,7 +1,7 @@
 from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
                             QPushButton, QCheckBox, QFrame, QGraphicsDropShadowEffect,
                             QMessageBox, QWidget)
-from PyQt5.QtCore import Qt, pyqtSignal, QPropertyAnimation, QEasingCurve, QRect
+from PyQt5.QtCore import Qt, pyqtSignal, QPropertyAnimation, QEasingCurve, QRect, QPoint
 from PyQt5.QtGui import QFont, QPixmap, QIcon, QPalette, QColor, QKeyEvent
 from loguru import logger
 
@@ -13,7 +13,7 @@ class LoginWindow(QDialog):
         self.auth_manager = auth_manager
         self.config = config
         self.setWindowTitle("Face Recognition System - Login")
-        self.setFixedSize(450, 600)
+        self.setFixedSize(450, 680)
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
         
@@ -47,8 +47,8 @@ class LoginWindow(QDialog):
         card.setGraphicsEffect(shadow)
         
         card_layout = QVBoxLayout(card)
-        card_layout.setContentsMargins(40, 40, 40, 40)
-        card_layout.setSpacing(20)
+        card_layout.setContentsMargins(30, 30, 30, 30)
+        card_layout.setSpacing(12)
         
         # Logo
         logo_label = QLabel()
@@ -57,7 +57,7 @@ class LoginWindow(QDialog):
         try:
             pixmap = QPixmap(logo_path)
             if not pixmap.isNull():
-                pixmap = pixmap.scaled(80, 80, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                pixmap = pixmap.scaled(65, 65, Qt.KeepAspectRatio, Qt.SmoothTransformation)
                 logo_label.setPixmap(pixmap)
             else:
                 raise FileNotFoundError
@@ -101,8 +101,8 @@ class LoginWindow(QDialog):
                 background-color: rgba(255, 255, 255, 0.08);
                 color: white;
                 border: 1px solid rgba(255, 255, 255, 0.15);
-                border-radius: 8px;
-                padding: 12px 16px;
+                border-radius: 6px;
+                padding: 10px 14px;
                 font-size: 14px;
             }
             QLineEdit:focus {
@@ -120,6 +120,8 @@ class LoginWindow(QDialog):
         self.password_input = QLineEdit()
         self.password_input.setPlaceholderText("Enter your password")
         self.password_input.setEchoMode(QLineEdit.Password)
+        self.username_input.setMinimumHeight(42)
+        self.password_input.setMinimumHeight(42)
         self.password_input.setStyleSheet("""
             QLineEdit {
                 background-color: rgba(255, 255, 255, 0.08);
@@ -272,30 +274,50 @@ class LoginWindow(QDialog):
         """Handle login attempt"""
         username = self.username_input.text().strip()
         password = self.password_input.text()
-        
+
         # Validate inputs
         if not username or not password:
             self.show_error("Please enter both username and password")
             return
-        
+
         # Disable button during login
         self.login_btn.setEnabled(False)
         self.login_btn.setText("Signing in...")
-        
-        # Attempt login
-        success, message, user = self.auth_manager.login(username, password)
-        
-        if success:
-            logger.info(f"Login successful for user: {username}")
-            self.login_successful.emit(user)
-            self.accept()
-        else:
-            logger.warning(f"Login failed for user: {username} - {message}")
-            self.show_error(message)
-            self.login_btn.setEnabled(True)
-            self.login_btn.setText("Sign In")
-            self.password_input.clear()
-            self.password_input.setFocus()
+
+        try:
+            # Attempt login
+            success, message, user = self.auth_manager.login(username, password)
+
+            if success:
+                logger.info(f"Login successful for user: {username}")
+                self.login_successful.emit(user)
+                self.accept()
+                return
+            else:
+                logger.warning(f"Login failed for user: {username} - {message}")
+                # show_error maneja la animación y el label
+                self.show_error(message)
+                # limpiar password y preparar reintento
+                self.password_input.clear()
+                self.password_input.setFocus()
+
+        except Exception as e:
+            logger.exception(f"Unexpected error during login: {e}")
+            # Mostrar un mensaje de error genérico al usuario
+            try:
+                self.show_error("Unexpected error occurred. Check logs.")
+            except Exception:
+                pass
+            
+        finally:
+            # Si no se aceptó (login fallido) re-habilitar botones para reintento
+            if not getattr(self, "_accepted", False):
+                try:
+                    self.login_btn.setEnabled(True)
+                    self.login_btn.setText("Sign In")
+                except Exception:
+                    pass
+
     
     def show_error(self, message: str):
         """Display error message"""
@@ -305,19 +327,37 @@ class LoginWindow(QDialog):
         # Shake animation
         original_pos = self.pos()
         shake_animation = QPropertyAnimation(self, b"pos")
-        shake_animation.setDuration(50)
-        shake_animation.setLoopCount(4)
+        shake_animation.setDuration(250)
+        shake_animation.setLoopCount(1)
+        
+        
         
         positions = [
-            QPoint(original_pos.x() - 5, original_pos.y()),
-            QPoint(original_pos.x() + 5, original_pos.y()),
+            QPoint(original_pos.x() - 8, original_pos.y()),
+            QPoint(original_pos.x() + 8, original_pos.y()),
         ]
         
         for i, pos in enumerate(positions):
             shake_animation.setKeyValueAt(i / len(positions), pos)
         
-        shake_animation.start()
-    
+        offset = 8
+        shake_animation.setKeyValueAt(0.0, original_pos)
+        shake_animation.setKeyValueAt(0.10, QPoint(original_pos.x() - offset, original_pos.y()))
+        shake_animation.setKeyValueAt(0.30, QPoint(original_pos.x() + offset, original_pos.y()))
+        shake_animation.setKeyValueAt(0.50, QPoint(original_pos.x() - offset, original_pos.y()))
+        shake_animation.setKeyValueAt(0.70, QPoint(original_pos.x() + offset, original_pos.y()))
+        shake_animation.setKeyValueAt(1.0, original_pos)
+        
+        # Guardar referencia para que no sea recolectada
+        self._shake_animation = shake_animation
+
+    # Iniciar la animación en un try/except para evitar fallos de render en Windows
+        try:
+            self._shake_animation.start()
+        except Exception as e:
+            logger.warning(f"Shake animation failed: {e}")
+        
+        
     def forgot_password(self):
         """Handle forgot password"""
         QMessageBox.information(

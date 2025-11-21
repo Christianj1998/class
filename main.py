@@ -1,19 +1,4 @@
-"""
-Multi-Camera Face Tracker System with Authentication
---------------------------------
-Main entry point with login system and user management.
 
-Features:
-- User authentication with role-based access control
-- Real-time face detection and recognition across multiple cameras
-- Alert notification system
-- Event logging with user tracking
-- Secure password hashing with bcrypt
-
-Author: Enhanced with Authentication System
-Created: 2025-05-21
-Updated: 2025-10-05
-"""
 
 import sys
 import yaml
