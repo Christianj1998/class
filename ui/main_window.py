@@ -710,9 +710,9 @@ class MainWindow(QMainWindow):
         dialog.exec_()
         
     def open_alert_panel(self):
-        dialog = AlertPanel(self.alert_system)
+        dialog = AlertPanel(self.alert_system, self.database)  # ← Pasar database
         dialog.exec_()
-        
+    
     def start_selected_camera(self):
         cam_id = self.camera_combo.currentData()
         if self.camera_manager.start_camera(cam_id):

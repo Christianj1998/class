@@ -1,6 +1,6 @@
 from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QListWidget, QPushButton,
                             QLabel, QCheckBox, QMessageBox, QListWidgetItem, QFrame,
-                            QGraphicsDropShadowEffect, QScrollArea, QWidget)
+                            QGraphicsDropShadowEffect, QScrollArea, QWidget, QGridLayout)
 from PyQt5.QtCore import Qt, QSize
 from PyQt5.QtGui import QFont, QColor, QPixmap, QCursor
 from loguru import logger
@@ -10,20 +10,57 @@ import cv2
 from datetime import datetime
 
 class AlertDetailDialog(QDialog):
-    """Ventana emergente con información detallada del registro en formato card"""
+    """Ventana de ficha policial estilo ID Card - Sin scroll"""
     
-    def __init__(self, alert_event, parent=None):
+    def __init__(self, alert_event, database, parent=None):
         super().__init__(parent)
         self.alert_event = alert_event
-        self.setWindowTitle(f"Detalle - {alert_event.face_name}")
+        self.database = database
+        self.face_data = None
+        
+        self.setWindowTitle(f"Ficha - {alert_event.face_name}")
         self.setModal(True)
-        self.setMinimumSize(800, 700)
+        self.setFixedSize(1100, 750)  # Tamaño fijo, sin scroll
+        
+        # Cargar datos de la base de datos
+        self.load_face_data()
         
         self.setup_style()
         self.init_ui()
         
+    def load_face_data(self):
+        """Cargar datos completos desde la base de datos"""
+        try:
+            known_faces = self.database.get_known_faces()
+            logger.info(f"Searching for: '{self.alert_event.face_name}' in {len(known_faces)} known faces")
+            
+            alert_name_normalized = self.alert_event.face_name.lower().strip()
+            
+            for face in known_faces:
+                name = face['name'].lower().strip()
+                lastname = face.get('lastname', '').lower().strip()
+                full_name = f"{name} {lastname}".strip()
+                
+                if (alert_name_normalized == name or 
+                    alert_name_normalized == full_name or
+                    alert_name_normalized == f"{name}{lastname}" or
+                    name in alert_name_normalized or
+                    alert_name_normalized in full_name):
+                    
+                    self.face_data = face
+                    logger.info(f"✅ Found face data: {face['name']} {face.get('lastname', '')} - Cedula: {face.get('cedula', 'N/A')}")
+                    break
+            
+            if not self.face_data:
+                logger.warning(f"❌ No database record found for: '{self.alert_event.face_name}'")
+                available_names = [f"{f['name']} {f.get('lastname', '')}" for f in known_faces[:5]]
+                logger.debug(f"Available names in DB: {available_names}")
+                
+        except Exception as e:
+            logger.error(f"Error loading face data: {e}", exc_info=True)
+    
     def setup_style(self):
-        """Estilo moderno Windows 11"""
+        """Estilo tipo ficha policial"""
         self.setStyleSheet("""
             QDialog {
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
@@ -38,362 +75,417 @@ class AlertDetailDialog(QDialog):
                 color: white;
                 border: none;
                 border-radius: 6px;
-                padding: 10px 20px;
+                padding: 10px 24px;
                 font-size: 13px;
-                font-weight: 500;
+                font-weight: 600;
             }
             QPushButton:hover {
                 background-color: rgba(0, 120, 212, 1);
             }
-            QPushButton#closeButton {
-                background-color: rgba(220, 53, 69, 0.8);
-            }
-            QPushButton#closeButton:hover {
-                background-color: rgba(220, 53, 69, 1);
-            }
         """)
     
     def init_ui(self):
-        """Crear interfaz con cards"""
+        """Crear interfaz tipo ficha policial"""
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 24, 24, 24)
-        layout.setSpacing(20)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(16)
         
-        # Scroll area para todo el contenido
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setStyleSheet("""
-            QScrollArea {
-                border: none;
-                background-color: transparent;
+        # HEADER - Título de ficha
+        header = self.create_header()
+        layout.addWidget(header)
+        
+        # GRID PRINCIPAL - 2 columnas
+        content_grid = QGridLayout()
+        content_grid.setSpacing(16)
+        
+        # COLUMNA IZQUIERDA - Foto y datos básicos
+        left_card = self.create_left_card()
+        content_grid.addWidget(left_card, 0, 0)
+        
+        # COLUMNA DERECHA - Información detallada
+        right_card = self.create_right_card()
+        content_grid.addWidget(right_card, 0, 1)
+        
+        layout.addLayout(content_grid)
+        
+        # FOOTER - Botón cerrar
+        footer_layout = QHBoxLayout()
+        footer_layout.addStretch()
+        
+        close_btn = QPushButton("CERRAR FICHA")
+        close_btn.clicked.connect(self.close)
+        close_btn.setMinimumWidth(200)
+        footer_layout.addWidget(close_btn)
+        footer_layout.addStretch()
+        
+        layout.addLayout(footer_layout)
+    
+    def create_header(self):
+        """Header tipo ficha oficial"""
+        header_frame = QFrame()
+        header_frame.setStyleSheet("""
+            QFrame {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 rgba(0, 120, 212, 0.4),
+                    stop:1 rgba(0, 120, 212, 0.2));
+                border: 2px solid rgba(0, 120, 212, 0.6);
+                border-radius: 10px;
+                padding: 16px;
             }
         """)
         
-        content_widget = QWidget()
-        content_layout = QVBoxLayout(content_widget)
-        content_layout.setSpacing(20)
+        shadow = QGraphicsDropShadowEffect()
+        shadow.setBlurRadius(15)
+        shadow.setColor(QColor(0, 120, 212, 100))
+        shadow.setOffset(0, 3)
+        header_frame.setGraphicsEffect(shadow)
         
-        # Header Card
-        header_card = self.create_header_card()
-        content_layout.addWidget(header_card)
+        header_layout = QHBoxLayout(header_frame)
         
-        # Image Card
-        if self.alert_event.screenshot_path:
-            image_card = self.create_image_card()
-            content_layout.addWidget(image_card)
+        # Título
+        title = QLabel("🆔 FICHA DE IDENTIFICACIÓN")
+        title.setStyleSheet("""
+            font-size: 24px;
+            font-weight: bold;
+            color: white;
+            letter-spacing: 2px;
+        """)
+        header_layout.addWidget(title)
         
-        # Info Card
-        info_card = self.create_info_card()
-        content_layout.addWidget(info_card)
+        header_layout.addStretch()
         
-        # Biometric Card (edad y género)
-        if self.alert_event.age or self.alert_event.gender:
-            bio_card = self.create_biometric_card()
-            content_layout.addWidget(bio_card)
+        # Fecha/Hora de detección
+        time_str = datetime.fromtimestamp(self.alert_event.timestamp).strftime("%d/%m/%Y  %H:%M:%S")
+        date_label = QLabel(f"📅 {time_str}")
+        date_label.setStyleSheet("""
+            font-size: 14px;
+            color: rgba(255, 255, 255, 0.9);
+            font-weight: 600;
+        """)
+        header_layout.addWidget(date_label)
         
-        # Location Card
-        location_card = self.create_location_card()
-        content_layout.addWidget(location_card)
-        
-        content_layout.addStretch()
-        
-        scroll.setWidget(content_widget)
-        layout.addWidget(scroll)
-        
-        # Close button
-        close_btn = QPushButton("Cerrar")
-        close_btn.setObjectName("closeButton")
-        close_btn.clicked.connect(self.close)
-        close_btn.setFixedWidth(150)
-        layout.addWidget(close_btn, alignment=Qt.AlignCenter)
+        return header_frame
     
-    def create_card(self, title, icon=""):
-        """Crear card base con estilo"""
+    def create_left_card(self):
+        """Tarjeta izquierda - Foto y datos básicos"""
         card = QFrame()
         card.setStyleSheet("""
             QFrame {
-                background-color: rgba(255, 255, 255, 0.05);
-                border: 1px solid rgba(255, 255, 255, 0.1);
+                background: rgba(255, 255, 255, 0.05);
+                border: 1px solid rgba(255, 255, 255, 0.15);
                 border-radius: 12px;
                 padding: 20px;
             }
         """)
         
-        # Shadow effect
         shadow = QGraphicsDropShadowEffect()
         shadow.setBlurRadius(20)
-        shadow.setColor(QColor(0, 0, 0, 80))
-        shadow.setOffset(0, 4)
+        shadow.setColor(QColor(0, 0, 0, 100))
+        shadow.setOffset(0, 5)
         card.setGraphicsEffect(shadow)
         
         card_layout = QVBoxLayout(card)
         card_layout.setSpacing(16)
         
-        # Title
-        title_label = QLabel(f"{icon} {title}")
-        title_label.setStyleSheet("""
-            font-size: 18px;
-            font-weight: 600;
-            color: white;
-            margin-bottom: 8px;
+        # FOTOGRAFÍA
+        photo_container = QFrame()
+        photo_container.setStyleSheet("""
+            QFrame {
+                background-color: rgba(0, 0, 0, 0.4);
+                border: 3px solid rgba(0, 120, 212, 0.5);
+                border-radius: 8px;
+                padding: 8px;
+            }
         """)
-        card_layout.addWidget(title_label)
+        photo_layout = QVBoxLayout(photo_container)
         
-        return card, card_layout
-    
-    def create_header_card(self):
-        """Card de header con nombre y estado"""
-        card, layout = self.create_card("Identificación", "🆔")
+        photo_label = QLabel("FOTOGRAFÍA")
+        photo_label.setStyleSheet("""
+            font-size: 11px;
+            font-weight: 600;
+            color: rgba(255, 255, 255, 0.7);
+            letter-spacing: 1px;
+        """)
+        photo_label.setAlignment(Qt.AlignCenter)
+        photo_layout.addWidget(photo_label)
         
-        # Nombre grande
-        name_label = QLabel(self.alert_event.face_name)
+        self.image_label = QLabel()
+        self.image_label.setAlignment(Qt.AlignCenter)
+        self.image_label.setFixedSize(380, 280)
+        self.image_label.setStyleSheet("""
+            background-color: rgba(0, 0, 0, 0.3);
+            border-radius: 6px;
+        """)
+        self.load_image()
+        photo_layout.addWidget(self.image_label)
+        
+        card_layout.addWidget(photo_container)
+        
+        # NOMBRE COMPLETO
+        if self.face_data:
+            full_name = f"{self.face_data['name'].upper()} {self.face_data.get('lastname', '').upper()}"
+        else:
+            full_name = self.alert_event.face_name.upper()
+        
+        name_label = QLabel(full_name)
         name_label.setStyleSheet("""
-            font-size: 32px;
+            font-size: 22px;
             font-weight: bold;
-            color: #4CAF50;
-            margin: 10px 0;
+            color: #4FC3F7;
+            letter-spacing: 1px;
+            padding: 12px;
+            background-color: rgba(0, 0, 0, 0.3);
+            border-radius: 6px;
         """)
         name_label.setAlignment(Qt.AlignCenter)
-        layout.addWidget(name_label)
+        name_label.setWordWrap(True)
+        card_layout.addWidget(name_label)
         
-        # Badge de confianza
+        # CONFIANZA
         confidence_pct = self.alert_event.confidence * 100 if self.alert_event.confidence <= 1 else self.alert_event.confidence
+        confidence_color = "#4CAF50" if confidence_pct >= 80 else "#FFC107" if confidence_pct >= 60 else "#F44336"
         
-        confidence_frame = QFrame()
-        confidence_frame.setStyleSheet(f"""
-            QFrame {{
-                background-color: {'rgba(76, 175, 80, 0.3)' if confidence_pct >= 80 else 'rgba(255, 193, 7, 0.3)' if confidence_pct >= 60 else 'rgba(244, 67, 54, 0.3)'};
-                border-radius: 20px;
-                padding: 8px 20px;
-            }}
-        """)
-        confidence_layout = QHBoxLayout(confidence_frame)
-        confidence_layout.setContentsMargins(0, 0, 0, 0)
-        
-        confidence_label = QLabel(f"🎯 Confianza: {confidence_pct:.1f}%")
-        confidence_label.setStyleSheet("""
+        confidence_label = QLabel(f"🎯 CONFIANZA: {confidence_pct:.1f}%")
+        confidence_label.setStyleSheet(f"""
             font-size: 16px;
-            font-weight: 600;
-            color: white;
+            font-weight: 700;
+            color: {confidence_color};
+            background-color: rgba(0, 0, 0, 0.4);
+            padding: 10px;
+            border-radius: 6px;
+            border: 2px solid {confidence_color};
         """)
         confidence_label.setAlignment(Qt.AlignCenter)
-        confidence_layout.addWidget(confidence_label)
+        card_layout.addWidget(confidence_label)
         
-        layout.addWidget(confidence_frame, alignment=Qt.AlignCenter)
-        
-        return card
-    
-    def create_image_card(self):
-        """Card con la imagen capturada"""
-        card, layout = self.create_card("Captura de Cámara", "📷")
-        
-        # Cargar imagen
-        screenshot_path = Path(self.alert_event.screenshot_path)
-        if screenshot_path.exists():
-            try:
-                image = cv2.imread(str(screenshot_path))
-                if image is not None:
-                    # Convertir a RGB
-                    image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-                    h, w, ch = image_rgb.shape
-                    bytes_per_line = ch * w
-                    
-                    from PyQt5.QtGui import QImage
-                    q_image = QImage(image_rgb.data, w, h, bytes_per_line, QImage.Format_RGB888)
-                    pixmap = QPixmap.fromImage(q_image)
-                    
-                    # Image label
-                    image_label = QLabel()
-                    image_label.setPixmap(pixmap.scaled(
-                        700, 400,
-                        Qt.KeepAspectRatio,
-                        Qt.SmoothTransformation
-                    ))
-                    image_label.setAlignment(Qt.AlignCenter)
-                    image_label.setStyleSheet("""
-                        QLabel {
-                            background-color: rgba(0, 0, 0, 0.3);
-                            border-radius: 8px;
-                            padding: 10px;
-                        }
-                    """)
-                    layout.addWidget(image_label)
-                    
-                    # Info de la imagen
-                    img_info = QLabel(f"📐 Resolución: {w}x{h} | 📄 {screenshot_path.name}")
-                    img_info.setStyleSheet("""
-                        font-size: 11px;
-                        color: rgba(255, 255, 255, 0.6);
-                        margin-top: 8px;
-                    """)
-                    img_info.setAlignment(Qt.AlignCenter)
-                    layout.addWidget(img_info)
-                    
-            except Exception as e:
-                logger.error(f"Error loading image: {e}")
-                error_label = QLabel("❌ Error al cargar la imagen")
-                error_label.setStyleSheet("color: #ff6b6b; font-size: 14px;")
-                error_label.setAlignment(Qt.AlignCenter)
-                layout.addWidget(error_label)
-        else:
-            no_image_label = QLabel("📷 Imagen no disponible")
-            no_image_label.setStyleSheet("color: rgba(255, 255, 255, 0.5); font-size: 14px;")
-            no_image_label.setAlignment(Qt.AlignCenter)
-            layout.addWidget(no_image_label)
+        card_layout.addStretch()
         
         return card
     
-    def create_info_card(self):
-        """Card con información general"""
-        card, layout = self.create_card("Información del Evento", "ℹ️")
+    def create_right_card(self):
+        """Tarjeta derecha - Información detallada"""
+        card = QFrame()
+        card.setStyleSheet("""
+            QFrame {
+                background: rgba(255, 255, 255, 0.05);
+                border: 1px solid rgba(255, 255, 255, 0.15);
+                border-radius: 12px;
+                padding: 20px;
+            }
+        """)
         
-        # Timestamp
-        time_str = datetime.fromtimestamp(self.alert_event.timestamp).strftime("%d/%m/%Y %H:%M:%S")
+        shadow = QGraphicsDropShadowEffect()
+        shadow.setBlurRadius(20)
+        shadow.setColor(QColor(0, 0, 0, 100))
+        shadow.setOffset(0, 5)
+        card.setGraphicsEffect(shadow)
         
-        info_items = [
-            ("🕒", "Fecha y Hora", time_str),
-            ("📹", "Cámara", f"{self.alert_event.camera_name} (ID: {self.alert_event.camera_id})"),
-            ("👤", "Persona Identificada", self.alert_event.face_name),
-        ]
+        card_layout = QVBoxLayout(card)
+        card_layout.setSpacing(12)
         
-        for icon, label_text, value in info_items:
-            item_frame = QFrame()
-            item_frame.setStyleSheet("""
+        # DATOS PERSONALES
+        personal_section = self.create_section("👤 DATOS PERSONALES")
+        card_layout.addWidget(personal_section)
+        
+        # DATOS BIOMÉTRICOS
+        bio_section = self.create_section("🧬 DATOS BIOMÉTRICOS")
+        card_layout.addWidget(bio_section)
+        
+        # INFORMACIÓN LEGAL (solo si existe)
+        if self.face_data and (self.face_data.get('crime') or self.face_data.get('case_number')):
+            legal_section = self.create_section("⚖️ INFORMACIÓN LEGAL", is_alert=True)
+            card_layout.addWidget(legal_section)
+        
+        # DETECCIÓN
+        detection_section = self.create_section("📹 DATOS DE DETECCIÓN")
+        card_layout.addWidget(detection_section)
+        
+        card_layout.addStretch()
+        
+        return card
+    
+    def create_section(self, title, is_alert=False):
+        """Crear sección de información"""
+        section = QFrame()
+        
+        if is_alert:
+            section.setStyleSheet("""
                 QFrame {
-                    background-color: rgba(255, 255, 255, 0.03);
+                    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                        stop:0 rgba(244, 67, 54, 0.3),
+                        stop:1 rgba(244, 67, 54, 0.1));
+                    border: 2px solid rgba(244, 67, 54, 0.5);
                     border-radius: 8px;
                     padding: 12px;
                 }
             """)
-            item_layout = QHBoxLayout(item_frame)
-            
-            # Icon + Label
-            label = QLabel(f"{icon} <b>{label_text}:</b>")
-            label.setStyleSheet("font-size: 13px; color: rgba(255, 255, 255, 0.8);")
-            item_layout.addWidget(label)
-            
-            item_layout.addStretch()
-            
-            # Value
-            value_label = QLabel(value)
-            value_label.setStyleSheet("font-size: 13px; color: white; font-weight: 600;")
-            item_layout.addWidget(value_label)
-            
-            layout.addWidget(item_frame)
-        
-        return card
-    
-    def create_biometric_card(self):
-        """Card con datos biométricos"""
-        card, layout = self.create_card("Datos Biométricos", "🧬")
-        
-        bio_layout = QHBoxLayout()
-        
-        # Age
-        if self.alert_event.age:
-            age_frame = QFrame()
-            age_frame.setStyleSheet("""
+        else:
+            section.setStyleSheet("""
                 QFrame {
-                    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                        stop:0 rgba(33, 150, 243, 0.3),
-                        stop:1 rgba(33, 150, 243, 0.1));
-                    border-radius: 12px;
-                    padding: 20px;
+                    background-color: rgba(0, 0, 0, 0.2);
+                    border: 1px solid rgba(255, 255, 255, 0.1);
+                    border-radius: 8px;
+                    padding: 12px;
                 }
             """)
-            age_layout = QVBoxLayout(age_frame)
-            
-            age_icon = QLabel("👶")
-            age_icon.setStyleSheet("font-size: 32px;")
-            age_icon.setAlignment(Qt.AlignCenter)
-            age_layout.addWidget(age_icon)
-            
-            age_label = QLabel(f"{self.alert_event.age}")
-            age_label.setStyleSheet("font-size: 36px; font-weight: bold; color: white;")
-            age_label.setAlignment(Qt.AlignCenter)
-            age_layout.addWidget(age_label)
-            
-            age_text = QLabel("Años (estimado)")
-            age_text.setStyleSheet("font-size: 12px; color: rgba(255, 255, 255, 0.7);")
-            age_text.setAlignment(Qt.AlignCenter)
-            age_layout.addWidget(age_text)
-            
-            bio_layout.addWidget(age_frame)
         
-        # Gender
-        if self.alert_event.gender:
-            gender_frame = QFrame()
-            gender_color = "rgba(233, 30, 99, 0.3)" if self.alert_event.gender == "Female" else "rgba(3, 169, 244, 0.3)"
-            gender_frame.setStyleSheet(f"""
-                QFrame {{
-                    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                        stop:0 {gender_color},
-                        stop:1 rgba(255, 255, 255, 0.05));
-                    border-radius: 12px;
-                    padding: 20px;
-                }}
-            """)
-            gender_layout = QVBoxLayout(gender_frame)
-            
-            gender_icon = QLabel("🚻")
-            gender_icon.setStyleSheet("font-size: 32px;")
-            gender_icon.setAlignment(Qt.AlignCenter)
-            gender_layout.addWidget(gender_icon)
-            
-            gender_label = QLabel(self.alert_event.gender)
-            gender_label.setStyleSheet("font-size: 28px; font-weight: bold; color: white;")
-            gender_label.setAlignment(Qt.AlignCenter)
-            gender_layout.addWidget(gender_label)
-            
-            gender_text = QLabel("Género (detectado)")
-            gender_text.setStyleSheet("font-size: 12px; color: rgba(255, 255, 255, 0.7);")
-            gender_text.setAlignment(Qt.AlignCenter)
-            gender_layout.addWidget(gender_text)
-            
-            bio_layout.addWidget(gender_frame)
+        section_layout = QVBoxLayout(section)
+        section_layout.setSpacing(8)
         
-        layout.addLayout(bio_layout)
-        return card
-    
-    def create_location_card(self):
-        """Card con información de ubicación"""
-        card, layout = self.create_card("Ubicación de la Detección", "📍")
-        
-        # Mapa visual simple
-        location_frame = QFrame()
-        location_frame.setStyleSheet("""
-            QFrame {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                    stop:0 rgba(76, 175, 80, 0.2),
-                    stop:1 rgba(76, 175, 80, 0.05));
-                border-radius: 8px;
-                padding: 16px;
-            }
+        # Título de sección
+        title_label = QLabel(title)
+        title_label.setStyleSheet("""
+            font-size: 13px;
+            font-weight: 700;
+            color: #64B5F6;
+            letter-spacing: 1px;
+            margin-bottom: 4px;
         """)
-        location_layout = QVBoxLayout(location_frame)
+        section_layout.addWidget(title_label)
         
-        camera_info = QLabel(f"🎥 <b>{self.alert_event.camera_name}</b>")
-        camera_info.setStyleSheet("font-size: 16px; color: white;")
-        location_layout.addWidget(camera_info)
+        # Línea separadora
+        line = QFrame()
+        line.setFrameShape(QFrame.HLine)
+        line.setStyleSheet("background-color: rgba(100, 181, 246, 0.3); max-height: 2px;")
+        section_layout.addWidget(line)
         
-        camera_id_info = QLabel(f"ID de Cámara: {self.alert_event.camera_id}")
-        camera_id_info.setStyleSheet("font-size: 13px; color: rgba(255, 255, 255, 0.7);")
-        location_layout.addWidget(camera_id_info)
+        # Contenido según la sección
+        if "PERSONALES" in title:
+            self.add_personal_data(section_layout)
+        elif "BIOMÉTRICOS" in title:
+            self.add_biometric_data(section_layout)
+        elif "LEGAL" in title:
+            self.add_legal_data(section_layout)
+        elif "DETECCIÓN" in title:
+            self.add_detection_data(section_layout)
         
-        layout.addWidget(location_frame)
+        return section
+    
+    def add_personal_data(self, layout):
+        """Agregar datos personales"""
+        if self.face_data:
+            if self.face_data.get('cedula'):
+                self.add_data_row(layout, "Cédula:", self.face_data['cedula'], "📋")
+            if self.face_data.get('birth_date'):
+                try:
+                    birth_date = datetime.strptime(self.face_data['birth_date'], "%Y-%m-%d")
+                    formatted_date = birth_date.strftime("%d/%m/%Y")
+                    self.add_data_row(layout, "Fecha Nac.:", formatted_date, "📅")
+                except:
+                    self.add_data_row(layout, "Fecha Nac.:", self.face_data['birth_date'], "📅")
+        else:
+            no_data = QLabel("⚠️ Sin datos en base de datos")
+            no_data.setStyleSheet("color: #FFC107; font-size: 12px; font-style: italic;")
+            layout.addWidget(no_data)
+    
+    def add_biometric_data(self, layout):
+        """Agregar datos biométricos"""
+        # Edad
+        display_age = None
+        age_source = ""
         
-        # File path si existe
-        if self.alert_event.screenshot_path:
-            path_label = QLabel(f"💾 Archivo: {Path(self.alert_event.screenshot_path).name}")
-            path_label.setStyleSheet("""
-                font-size: 11px;
-                color: rgba(255, 255, 255, 0.5);
-                margin-top: 8px;
+        if self.face_data and self.face_data.get('age'):
+            display_age = self.face_data['age']
+            age_source = "(Registrado)"
+        elif self.alert_event.age:
+            display_age = self.alert_event.age
+            age_source = "(Estimado IA)"
+        
+        if display_age:
+            self.add_data_row(layout, "Edad:", f"{display_age} años {age_source}", "👶")
+        
+        # Género
+        if self.alert_event.gender:
+            self.add_data_row(layout, "Género:", f"{self.alert_event.gender} (Detectado IA)", "🚻")
+    
+    def add_legal_data(self, layout):
+        """Agregar información legal"""
+        if self.face_data:
+            if self.face_data.get('crime'):
+                crime_label = QLabel(f"🚨 {self.face_data['crime']}")
+                crime_label.setStyleSheet("""
+                    color: #FF5252;
+                    font-size: 12px;
+                    font-weight: 600;
+                    padding: 6px;
+                    background-color: rgba(255, 82, 82, 0.1);
+                    border-radius: 4px;
+                """)
+                crime_label.setWordWrap(True)
+                layout.addWidget(crime_label)
+            
+            if self.face_data.get('case_number'):
+                self.add_data_row(layout, "Expediente:", self.face_data['case_number'], "📁")
+    
+    def add_detection_data(self, layout):
+        """Agregar datos de detección"""
+        self.add_data_row(layout, "Cámara:", f"{self.alert_event.camera_name}", "📹")
+        self.add_data_row(layout, "ID Cámara:", f"{self.alert_event.camera_id}", "🔢")
+    
+    def add_data_row(self, layout, label, value, icon=""):
+        """Agregar fila de datos"""
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        
+        label_widget = QLabel(f"{icon} {label}")
+        label_widget.setStyleSheet("""
+            color: rgba(255, 255, 255, 0.7);
+            font-size: 12px;
+            font-weight: 600;
+            min-width: 100px;
+        """)
+        row.addWidget(label_widget)
+        
+        value_widget = QLabel(str(value))
+        value_widget.setStyleSheet("""
+            color: white;
+            font-size: 12px;
+            font-weight: 500;
+        """)
+        value_widget.setWordWrap(True)
+        row.addWidget(value_widget, 1)
+        
+        layout.addLayout(row)
+    
+    def load_image(self):
+        """Cargar imagen de captura"""
+        if not self.alert_event.screenshot_path:
+            self.image_label.setText("📷\n\nSIN IMAGEN")
+            self.image_label.setStyleSheet("""
+                color: rgba(255, 255, 255, 0.3);
+                font-size: 16px;
+                font-weight: bold;
+                background-color: rgba(0, 0, 0, 0.3);
+                border-radius: 6px;
             """)
-            path_label.setWordWrap(True)
-            layout.addWidget(path_label)
+            return
         
-        return card
+        screenshot_path = Path(self.alert_event.screenshot_path)
+        if not screenshot_path.exists():
+            self.image_label.setText("📷\n\nARCHIVO NO ENCONTRADO")
+            return
+        
+        try:
+            image = cv2.imread(str(screenshot_path))
+            if image is not None:
+                image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+                h, w, ch = image_rgb.shape
+                bytes_per_line = ch * w
+                
+                from PyQt5.QtGui import QImage
+                q_image = QImage(image_rgb.data, w, h, bytes_per_line, QImage.Format_RGB888)
+                pixmap = QPixmap.fromImage(q_image)
+                
+                scaled_pixmap = pixmap.scaled(
+                    self.image_label.width() - 10,
+                    self.image_label.height() - 10,
+                    Qt.KeepAspectRatio,
+                    Qt.SmoothTransformation
+                )
+                self.image_label.setPixmap(scaled_pixmap)
+        except Exception as e:
+            logger.error(f"Error loading image: {e}")
+            self.image_label.setText("❌\n\nERROR AL CARGAR")
 
 
 class ClickableAlertItem(QListWidgetItem):
@@ -402,15 +494,15 @@ class ClickableAlertItem(QListWidgetItem):
     def __init__(self, alert_event, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.alert_event = alert_event
-        
-        # Estilo de cursor
         self.setFlags(self.flags() | Qt.ItemIsEnabled | Qt.ItemIsSelectable)
 
 
 class AlertPanel(QDialog):
-    def __init__(self, alert_system):
+    def __init__(self, alert_system, database=None):
         super().__init__()
         self.alert_system = alert_system
+        self.database = database
+        
         self.setWindowTitle("Panel de Alertas")
         self.setGeometry(300, 300, 900, 600)
         self.setMinimumSize(800, 500)
@@ -511,7 +603,7 @@ class AlertPanel(QDialog):
         title.setStyleSheet("font-size: 24px; font-weight: bold; color: white;")
         header_layout.addWidget(title)
         
-        subtitle = QLabel("Haz clic en cualquier alerta para ver detalles completos")
+        subtitle = QLabel("Haz clic en cualquier alerta para ver la ficha completa")
         subtitle.setStyleSheet("color: rgba(255, 255, 255, 0.7); font-size: 13px;")
         header_layout.addWidget(subtitle)
         
@@ -579,10 +671,8 @@ class AlertPanel(QDialog):
             time_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(alert.timestamp))
             confidence_pct = alert.confidence * 100 if alert.confidence <= 1 else alert.confidence
             
-            # Crear texto con formato mejorado
             item_text = f"🕒 {time_str}  |  👤 {alert.face_name}  |  📹 {alert.camera_name}  |  🎯 {confidence_pct:.1f}%"
             
-            # Agregar info biométrica si existe
             bio_info = []
             if alert.age:
                 bio_info.append(f"👶 {alert.age} años")
@@ -592,16 +682,14 @@ class AlertPanel(QDialog):
             if bio_info:
                 item_text += f"\n   {' | '.join(bio_info)}"
             
-            # Crear item clickeable
             item = ClickableAlertItem(alert, item_text)
             
-            # Color según confianza
             if confidence_pct >= 80:
-                item.setForeground(QColor(76, 175, 80))  # Verde
+                item.setForeground(QColor(76, 175, 80))
             elif confidence_pct >= 60:
-                item.setForeground(QColor(255, 193, 7))  # Amarillo
+                item.setForeground(QColor(255, 193, 7))
             else:
-                item.setForeground(QColor(244, 67, 54))  # Rojo
+                item.setForeground(QColor(244, 67, 54))
             
             self.alert_list.addItem(item)
             
@@ -609,14 +697,22 @@ class AlertPanel(QDialog):
         """Handle alert click - show detail dialog"""
         if isinstance(item, ClickableAlertItem):
             try:
-                detail_dialog = AlertDetailDialog(item.alert_event, self)
+                if not self.database:
+                    QMessageBox.warning(
+                        self,
+                        "Error",
+                        "No se puede acceder a la base de datos."
+                    )
+                    return
+                
+                detail_dialog = AlertDetailDialog(item.alert_event, self.database, self)
                 detail_dialog.exec_()
             except Exception as e:
                 logger.error(f"Error showing alert detail: {e}")
                 QMessageBox.critical(
                     self,
                     "Error",
-                    f"No se pudo mostrar el detalle de la alerta:\n{str(e)}"
+                    f"No se pudo mostrar el detalle:\n{str(e)}"
                 )
             
     def toggle_alerts(self, state):
@@ -651,3 +747,4 @@ class AlertPanel(QDialog):
                 "Éxito",
                 "Todas las alertas han sido eliminadas."
             )
+            
